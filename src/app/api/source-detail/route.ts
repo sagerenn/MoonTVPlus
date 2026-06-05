@@ -116,6 +116,39 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: '缺少必要参数' }, { status: 400 });
   }
 
+  if (sourceCode === 'directplay') {
+    try {
+      const { base58Decode } = await import('@/lib/utils');
+      const directUrl = base58Decode(id).trim();
+
+      if (!/^https?:\/\//i.test(directUrl)) {
+        throw new Error('无效的直链地址');
+      }
+
+      return NextResponse.json({
+        id,
+        title: title || '直链播放',
+        poster: '',
+        episodes: [directUrl],
+        episodes_titles: ['直链'],
+        source: 'directplay',
+        source_name: '直链',
+        class: '',
+        year: '',
+        desc: '',
+        type_name: '',
+        douban_id: 0,
+        subtitles: [],
+        proxyMode: false,
+      });
+    } catch (error) {
+      return NextResponse.json(
+        { error: (error as Error).message || '直链地址解析失败' },
+        { status: 400 }
+      );
+    }
+  }
+
   if (isNetdiskSource(sourceCode)) {
     const allowed = await hasFeaturePermission(
       authInfo.username,

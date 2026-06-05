@@ -6,10 +6,14 @@ import {
   Heart,
   Info,
   Link,
+  Loader2,
+  Monitor,
   PlayCircleIcon,
   Radio,
+  RefreshCw,
   Sparkles,
   Trash2,
+  X,
 } from 'lucide-react';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
@@ -23,6 +27,7 @@ import React, {
   useRef,
   useState,
 } from 'react';
+import { createPortal } from 'react-dom';
 
 import {
   deleteFavorite,
@@ -44,6 +49,10 @@ import {
   tryApplyDoubanImageFallback,
 } from '@/lib/utils';
 import { useLongPress } from '@/hooks/useLongPress';
+import type {
+  TVRemoteDevice,
+  TVRemotePlayCommand,
+} from '@/lib/tv-remote-types';
 
 import AIChatPanel from '@/components/AIChatPanel';
 import DetailPanel from '@/components/DetailPanel';
@@ -171,6 +180,12 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
     const [showImageViewer, setShowImageViewer] = useState(false);
     const [showUpcomingInfo, setShowUpcomingInfo] = useState(false); // 控制即将上映倒计时的显示
     const [displayPoster, setDisplayPoster] = useState(processedPoster);
+    const [showTVDevicePicker, setShowTVDevicePicker] = useState(false);
+    const [tvDevices, setTVDevices] = useState<TVRemoteDevice[]>([]);
+    const [selectedTVDeviceId, setSelectedTVDeviceId] = useState('');
+    const [tvDevicesLoading, setTVDevicesLoading] = useState(false);
+    const [tvCastSending, setTVCastSending] = useState(false);
+    const [tvCastStatus, setTVCastStatus] = useState('');
 
     // 检查AI功能是否启用
     useEffect(() => {
@@ -519,6 +534,135 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
       onBeforeNavigate,
     ]);
 
+    const buildTVRemotePlayCommand =
+      useCallback((): TVRemotePlayCommand | null => {
+        if (isUpcoming || origin === 'live') return null;
+
+        const commandTitle = actualTitle.trim() || actualQuery.trim();
+        const searchTitle = (actualQuery || actualTitle).trim();
+        if (!commandTitle && !actualId) return null;
+
+        const command: TVRemotePlayCommand = {
+          title: commandTitle || searchTitle || actualId || '',
+          index: Math.max(0, (currentEpisode || 1) - 1),
+        };
+
+        if (searchTitle) {
+          command.searchTitle = searchTitle;
+        }
+
+        if (actualSource && actualId) {
+          command.source = actualSource;
+          command.id = actualId;
+        }
+
+        return command;
+      }, [
+        actualId,
+        actualQuery,
+        actualSource,
+        actualTitle,
+        currentEpisode,
+        isDirectPlaySource,
+        isUpcoming,
+        origin,
+      ]);
+
+    const loadTVDevices = useCallback(async () => {
+      setTVDevicesLoading(true);
+      setTVCastStatus('');
+      try {
+        const response = await fetch('/api/tv-remote/devices', {
+          cache: 'no-store',
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.error || '无法获取电视端列表');
+        }
+
+        const nextDevices = Array.isArray(data.devices) ? data.devices : [];
+        setTVDevices(nextDevices);
+        setSelectedTVDeviceId((current) => {
+          if (
+            nextDevices.some(
+              (device: TVRemoteDevice) => device.deviceId === current
+            )
+          ) {
+            return current;
+          }
+          return nextDevices[0]?.deviceId || '';
+        });
+        setTVCastStatus(nextDevices.length ? '' : '没有在线电视端');
+      } catch (error) {
+        setTVDevices([]);
+        setSelectedTVDeviceId('');
+        setTVCastStatus(
+          error instanceof Error ? error.message : '无法获取电视端列表'
+        );
+      } finally {
+        setTVDevicesLoading(false);
+      }
+    }, []);
+
+    const openTVDevicePicker = useCallback(() => {
+      const command = buildTVRemotePlayCommand();
+      if (!command) return;
+
+      setTVCastStatus('');
+      window.setTimeout(() => {
+        setShowTVDevicePicker(true);
+        void loadTVDevices();
+      }, 250);
+    }, [buildTVRemotePlayCommand, loadTVDevices]);
+
+    const sendToTV = useCallback(
+      async (deviceId = selectedTVDeviceId) => {
+        const command = buildTVRemotePlayCommand();
+        if (!command) {
+          setTVCastStatus('此内容暂不支持投到电视');
+          return;
+        }
+        if (!deviceId) {
+          setTVCastStatus('请选择电视端');
+          return;
+        }
+
+        setTVCastSending(true);
+        setTVCastStatus('');
+        try {
+          const response = await fetch('/api/tv-remote/play', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId, command }),
+          });
+          const data = await response.json().catch(() => ({
+            success: false,
+            error: '发送失败',
+          }));
+          if (!response.ok || !data.success) {
+            throw new Error(data.error || '发送失败');
+          }
+
+          const device = tvDevices.find((item) => item.deviceId === deviceId);
+          setTVCastStatus(
+            device ? `已发送到 ${device.deviceName}` : '已发送到电视端'
+          );
+          window.setTimeout(() => {
+            setShowTVDevicePicker(false);
+          }, 700);
+        } catch (error) {
+          setTVCastStatus(error instanceof Error ? error.message : '发送失败');
+        } finally {
+          setTVCastSending(false);
+        }
+      },
+      [
+        buildTVRemotePlayCommand,
+        selectedTVDeviceId,
+        tvDevices,
+      ]
+    );
+
     // 检查搜索结果的收藏状态
     const checkSearchFavoriteStatus = useCallback(async () => {
       if (
@@ -686,6 +830,16 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
           onClick: handlePlayInNewTab,
           color: 'default' as const,
         });
+
+        if (buildTVRemotePlayCommand()) {
+          actions.push({
+            id: 'play-tv',
+            label: '投到电视',
+            icon: <Monitor size={20} />,
+            onClick: openTVDevicePicker,
+            color: 'default' as const,
+          });
+        }
       }
 
       // 聚合源信息 - 直接在菜单中展示，不需要单独的操作项
@@ -846,6 +1000,8 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
       handleToggleFavorite,
       handleDeleteRecord,
       handlePlayInNewTab,
+      buildTVRemotePlayCommand,
+      openTVDevicePicker,
       aiEnabled,
       actualTitle,
     ]);
@@ -1967,6 +2123,121 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
             setShowImageViewer(true);
           }}
         />
+
+        {showTVDevicePicker &&
+          typeof document !== 'undefined' &&
+          createPortal(
+            <>
+              <div
+                className='fixed inset-0 z-[10000] bg-black/55 backdrop-blur-sm'
+                onClick={() => setShowTVDevicePicker(false)}
+                onTouchMove={(e) => e.preventDefault()}
+                onWheel={(e) => e.preventDefault()}
+                style={{ touchAction: 'none' }}
+              />
+              <div className='fixed inset-x-4 top-1/2 z-[10001] mx-auto max-h-[90vh] max-w-md -translate-y-1/2 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl dark:border-gray-800 dark:bg-gray-900'>
+                <div
+                  className='max-h-[90vh] overflow-y-auto p-4'
+                  onTouchMove={(e) => e.stopPropagation()}
+                  style={{ touchAction: 'auto' }}
+                >
+                  <div className='mb-4 flex items-start justify-between gap-3'>
+                    <div className='min-w-0'>
+                      <div className='mb-2 inline-flex items-center gap-2 rounded-full bg-green-500/10 px-3 py-1 text-xs font-semibold text-green-600 dark:text-green-400'>
+                        <Monitor size={14} />
+                        TV
+                      </div>
+                      <h3 className='truncate text-lg font-semibold text-gray-900 dark:text-gray-100'>
+                        投到电视
+                      </h3>
+                      <p className='mt-1 truncate text-sm text-gray-500 dark:text-gray-400'>
+                        {actualTitle}
+                      </p>
+                    </div>
+                    <button
+                      type='button'
+                      onClick={() => setShowTVDevicePicker(false)}
+                      className='flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-gray-500 transition hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-gray-800 dark:hover:text-gray-100'
+                      aria-label='关闭'
+                    >
+                      <X size={18} />
+                    </button>
+                  </div>
+
+                  <div className='mb-3 flex items-center justify-between gap-3'>
+                    <div className='text-sm font-medium text-gray-700 dark:text-gray-300'>
+                      在线电视端
+                    </div>
+                    <button
+                      type='button'
+                      onClick={() => loadTVDevices()}
+                      disabled={tvDevicesLoading}
+                      className='inline-flex h-9 items-center gap-2 rounded-lg border border-gray-200 px-3 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-60 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800'
+                    >
+                      {tvDevicesLoading ? (
+                        <Loader2 size={16} className='animate-spin' />
+                      ) : (
+                        <RefreshCw size={16} />
+                      )}
+                      刷新
+                    </button>
+                  </div>
+
+                  {tvDevices.length > 0 ? (
+                    <div className='max-h-64 space-y-2 overflow-y-auto pr-1'>
+                      {tvDevices.map((device) => (
+                        <button
+                          key={device.deviceId}
+                          type='button'
+                          onClick={() => {
+                            setSelectedTVDeviceId(device.deviceId);
+                            setTVCastStatus('');
+                          }}
+                          className={`w-full rounded-xl border px-3 py-3 text-left transition ${
+                            selectedTVDeviceId === device.deviceId
+                              ? 'border-green-500 bg-green-50 text-green-900 dark:border-green-400 dark:bg-green-500/15 dark:text-green-100'
+                              : 'border-gray-200 bg-gray-50/60 text-gray-800 hover:border-gray-300 dark:border-gray-700 dark:bg-gray-800/60 dark:text-gray-200'
+                          }`}
+                        >
+                          <div className='truncate text-sm font-semibold'>
+                            {device.deviceName}
+                          </div>
+                          <div className='mt-1 truncate text-xs opacity-70'>
+                            {device.title || device.currentPath || '电视端'}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className='rounded-xl border border-dashed border-gray-300 bg-gray-50 px-4 py-8 text-center text-sm text-gray-500 dark:border-gray-700 dark:bg-gray-800/60 dark:text-gray-400'>
+                      {tvDevicesLoading ? '正在查找在线电视端...' : '没有在线电视端'}
+                    </div>
+                  )}
+
+                  {tvCastStatus && (
+                    <p className='mt-3 rounded-xl bg-gray-100 px-3 py-2 text-center text-sm text-gray-600 dark:bg-gray-800 dark:text-gray-300'>
+                      {tvCastStatus}
+                    </p>
+                  )}
+
+                  <button
+                    type='button'
+                    onClick={() => sendToTV()}
+                    disabled={!selectedTVDeviceId || tvCastSending}
+                    className='mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-green-600 px-4 text-sm font-semibold text-white transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-60'
+                  >
+                    {tvCastSending ? (
+                      <Loader2 size={18} className='animate-spin' />
+                    ) : (
+                      <Monitor size={18} />
+                    )}
+                    发送到电视
+                  </button>
+                </div>
+              </div>
+            </>,
+            document.body
+          )}
 
         {/* AI问片面板 - 只在打开或正在流式响应时渲染 */}
         {aiEnabled && (showAIChat || isAIStreaming) && (

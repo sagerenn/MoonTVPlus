@@ -32,3 +32,12 @@ export interface TVRemoteTextCommand {
   mode: TVRemoteTextMode;
   text?: string;
 }
+
+export interface TVRemotePlayCommand {
+  source?: string;
+  id?: string;
+  title: string;
+  searchTitle?: string;
+  fileName?: string;
+  index?: number;
+}

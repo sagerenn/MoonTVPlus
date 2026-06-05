@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MoonTVPlus TV</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">LG webOS 4</p>
+          <h1>MoonTVPlus TV</h1>
+        </div>
+        <div class="topbar-actions">
+          <span id="server-badge" class="server-badge">Not connected</span>
+          <button id="logout-button" class="ghost-button hidden" type="button">
+            Log Out
+          </button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="sidebar">
+          <section class="panel">
+            <h2>Server</h2>
+            <form id="server-form" class="stack-form">
+              <label class="field">
+                <span>MoonTVPlus URL</span>
+                <input
+                  id="server-url"
+                  name="server-url"
+                  type="url"
+                  placeholder="https://moontv.example.com"
+                  autocomplete="url"
+                />
+              </label>
+              <div class="row">
+                <button class="primary-button" type="submit">Save</button>
+                <button id="open-server-button" class="ghost-button" type="button">
+                  Open TV URL
+                </button>
+              </div>
+              <p class="hint">
+                Host this TV frontend under the same MoonTVPlus origin at
+                <code>/webos-tv/index.html</code>. MoonTVPlus authenticated TV APIs are
+                not supported cross-origin.
+              </p>
+            </form>
+          </section>
+
+          <section class="panel">
+            <h2>Session</h2>
+            <form id="login-form" class="stack-form">
+              <label class="field">
+                <span>Username</span>
+                <input id="username" name="username" type="text" autocomplete="username" />
+              </label>
+              <label class="field">
+                <span>Password</span>
+                <input
+                  id="password"
+                  name="password"
+                  type="password"
+                  autocomplete="current-password"
+                />
+              </label>
+              <button class="primary-button" type="submit">Log In</button>
+              <p id="session-summary" class="hint">No active session.</p>
+            </form>
+          </section>
+
+          <section class="panel">
+            <h2>Search</h2>
+            <form id="search-form" class="stack-form">
+              <label class="field">
+                <span>Keyword</span>
+                <input
+                  id="search-input"
+                  name="search-input"
+                  type="search"
+                  placeholder="Movie, series, anime..."
+                />
+              </label>
+              <button class="primary-button" type="submit">Search</button>
+            </form>
+          </section>
+
+          <section class="panel">
+            <h2>Status</h2>
+            <div id="status-panel" class="status-panel">Configure the server and sign in.</div>
+          </section>
+        </aside>
+
+        <section class="content">
+          <section class="hero panel hidden" id="detail-panel">
+            <div class="hero-art">
+              <img id="detail-poster" alt="" />
+            </div>
+            <div class="hero-copy">
+              <p id="detail-source" class="eyebrow">Source</p>
+              <h2 id="detail-title">No title selected</h2>
+              <p id="detail-meta" class="meta-line"></p>
+              <p id="detail-desc" class="description"></p>
+              <div class="hero-actions">
+                <button id="favorite-button" class="primary-button" type="button">
+                  Add Favorite
+                </button>
+                <button id="resume-button" class="ghost-button hidden" type="button">
+                  Resume
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="section-header">
+              <h2>Continue Watching</h2>
+              <p id="history-summary" class="hint">No history loaded.</p>
+            </div>
+            <div id="history-grid" class="card-grid compact-grid"></div>
+          </section>
+
+          <section class="panel">
+            <div class="section-header">
+              <h2>Favorites</h2>
+              <p id="favorites-summary" class="hint">No favorites loaded.</p>
+            </div>
+            <div id="favorites-grid" class="card-grid compact-grid"></div>
+          </section>
+
+          <section class="panel">
+            <div class="section-header">
+              <h2>Results</h2>
+              <p id="results-summary" class="hint">No search yet.</p>
+            </div>
+            <div id="results-grid" class="card-grid"></div>
+          </section>
+
+          <section class="panel">
+            <div class="section-header">
+              <h2>Episodes</h2>
+              <p id="episode-summary" class="hint">Select a title to browse episodes.</p>
+            </div>
+            <div id="episode-grid" class="episode-grid"></div>
+          </section>
+
+          <section class="panel player-panel" id="player-panel">
+            <div class="section-header">
+              <h2>Player</h2>
+              <p id="player-summary" class="hint">Choose an episode to start playback.</p>
+            </div>
+            <div
+              id="player-shell"
+              class="player-shell"
+              data-player-mode="idle"
+              data-controls-open="true"
+            >
+              <video id="player" class="player" playsinline tabindex="0"></video>
+              <div id="player-center-hint" class="player-center-hint hidden"></div>
+              <div id="player-digit-hint" class="player-digit-hint hidden"></div>
+              <div id="player-overlay" class="player-overlay">
+                <div class="player-overlay-top">
+                  <div>
+                    <p class="eyebrow">Now Playing</p>
+                    <h3 id="player-overlay-title">No episode selected</h3>
+                  </div>
+                  <span id="player-engine-badge" class="server-badge">Idle</span>
+                </div>
+                <div class="player-progress">
+                  <div class="player-progress-track">
+                    <div id="player-progress-fill" class="player-progress-fill"></div>
+                  </div>
+                  <div class="player-progress-meta">
+                    <span id="player-current-time">0:00</span>
+                    <span id="player-duration">0:00</span>
+                  </div>
+                </div>
+                <div class="player-controls">
+                  <button id="player-play-button" class="ghost-button player-control-button" type="button">
+                    Play
+                  </button>
+                  <button id="player-backward-button" class="ghost-button player-control-button" type="button">
+                    -10s
+                  </button>
+                  <button id="player-forward-button" class="ghost-button player-control-button" type="button">
+                    +10s
+                  </button>
+                  <button id="player-volume-down-button" class="ghost-button player-control-button" type="button">
+                    Vol -
+                  </button>
+                  <button id="player-volume-up-button" class="ghost-button player-control-button" type="button">
+                    Vol +
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="section-header">
+              <h2>Subtitles</h2>
+              <p id="subtitle-summary" class="hint">Choose an episode to inspect subtitle tracks.</p>
+            </div>
+            <div id="subtitle-grid" class="subtitle-grid"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

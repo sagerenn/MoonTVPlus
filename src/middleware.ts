@@ -163,6 +163,10 @@ function handleAuthFailure(
 
 // 判断是否需要跳过认证的路径
 function shouldSkipAuth(pathname: string): boolean {
+  if (pathname === '/webos-tv' || pathname.startsWith('/webos-tv/')) {
+    return true;
+  }
+
   const skipPaths = [
     '/_next',
     '/favicon.ico',
