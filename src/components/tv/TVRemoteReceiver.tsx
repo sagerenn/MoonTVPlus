@@ -10,6 +10,7 @@ import {
 } from '@/lib/tv-remote-core';
 import type {
   TVRemoteKeyCommand,
+  TVRemotePlayCommand,
   TVRemoteTextCommand,
 } from '@/lib/tv-remote-types';
 
@@ -45,6 +46,21 @@ function getDeviceName() {
   if (/Windows/i.test(ua)) return 'Windows TV Web';
   if (/Macintosh|Mac OS/i.test(ua)) return 'Mac TV Web';
   return 'Web TV';
+}
+
+function buildTVPlayUrl(command: TVRemotePlayCommand) {
+  const params = new URLSearchParams();
+  if (command.source) params.set('source', command.source);
+  if (command.id) params.set('id', command.id);
+  const title = command.source || command.id
+    ? command.title
+    : command.searchTitle || command.title;
+  if (title) params.set('title', title);
+  if (command.fileName) params.set('fileName', command.fileName);
+  if (typeof command.index === 'number' && Number.isFinite(command.index)) {
+    params.set('index', String(Math.max(0, Math.floor(command.index))));
+  }
+  return `/tv/play?${params.toString()}`;
 }
 
 export default function TVRemoteReceiver() {
@@ -103,6 +119,10 @@ export default function TVRemoteReceiver() {
     socket.on('tv-remote:text', (command: TVRemoteTextCommand) => {
       applyTVRemoteText(command);
     });
+    socket.on('tv-remote:play', (command: TVRemotePlayCommand) => {
+      if (!command?.title && !command?.id) return;
+      window.location.href = buildTVPlayUrl(command);
+    });
 
     const interval = window.setInterval(updateState, 10000);
     const onVisibilityChange = () => {
@@ -119,6 +139,7 @@ export default function TVRemoteReceiver() {
       socket.off('connect', register);
       socket.off('tv-remote:key');
       socket.off('tv-remote:text');
+      socket.off('tv-remote:play');
       receiverState.refCount = Math.max(0, receiverState.refCount - 1);
       if (receiverState.refCount === 0) {
         receiverState.disconnectTimer = window.setTimeout(() => {
