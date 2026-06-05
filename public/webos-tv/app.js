@@ -68,6 +68,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   let tvRemoteSocket = null;
   let tvRemoteStateTimer = 0;
   let socketIoLibraryPromise = null;
+  let startupConfig = null;
   function installCompatibilityPolyfills() {
     if (!Object.assign) {
       Object.assign = function (target) {
@@ -156,8 +157,10 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   }
   function init() {
     cacheElements();
+    startupConfig = consumeStartupConfig();
     bindEvents();
     hydrateState();
+    applyStartupConfig();
     const hasPendingRemotePlay = hasPendingRemotePlayCommand();
     renderServer();
     renderSession();
@@ -171,6 +174,8 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     focusInitialElement();
     if (hasAuthenticatedSession()) {
       restoreAuthenticatedState();
+    } else if (shouldAutoLoginFromStartupConfig()) {
+      loginFromStartupConfig();
     }
     if (hasPendingRemotePlay) {
       consumePendingRemotePlayCommand(0);
@@ -345,6 +350,68 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
         state.favorites = loadLocalSyncCache('favorites');
       }
     }
+  }
+  function consumeStartupConfig() {
+    const hash = String(window.location.hash || '');
+    const prefix = '#moontv-config=';
+    let payload = '';
+    if (hash.indexOf(prefix) !== 0) {
+      return null;
+    }
+    payload = hash.slice(prefix.length);
+    clearStartupConfigHash();
+    try {
+      return JSON.parse(decodeBase64Url(decodeURIComponent(payload)));
+    } catch (error) {
+      return null;
+    }
+  }
+  function clearStartupConfigHash() {
+    if (window.history && window.history.replaceState) {
+      try {
+        window.history.replaceState(null, document.title, window.location.pathname + window.location.search);
+        if (!window.location.hash) {
+          return;
+        }
+      } catch (error) {}
+    }
+    window.location.replace(window.location.href.replace(/#.*$/, ''));
+  }
+  function decodeBase64Url(value) {
+    const normalized = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + new Array((4 - normalized.length % 4) % 4 + 1).join('=');
+    return decodeURIComponent(escape(window.atob(padded)));
+  }
+  function applyStartupConfig() {
+    if (!startupConfig || typeof startupConfig !== 'object') {
+      return;
+    }
+    const serverUrl = normalizeStartupServerUrl(startupConfig.serverUrl || deriveHostedServerUrl());
+    const username = String(startupConfig.username || '').trim();
+    const password = String(startupConfig.password || '');
+    if (serverUrl) {
+      state.serverUrl = serverUrl;
+      elements.serverUrl.value = serverUrl;
+      state.isHostedOnSameOrigin = computeSameOrigin();
+      localStorage.setItem(storageKeys.serverUrl, state.serverUrl);
+    }
+    if (username) {
+      elements.username.value = username;
+    }
+    if (password) {
+      elements.password.value = password;
+    }
+  }
+  function shouldAutoLoginFromStartupConfig() {
+    return Boolean(startupConfig && typeof startupConfig === 'object' && String(startupConfig.password || '') && state.serverUrl && state.isHostedOnSameOrigin);
+  }
+  function normalizeStartupServerUrl(value) {
+    const normalized = normalizeServerUrl(value);
+    const suffix = publicAppPath.replace(/\/+$/, '');
+    if (normalized.slice(-suffix.length) === suffix) {
+      return normalizeServerUrl(normalized.slice(0, -suffix.length));
+    }
+    return normalized;
   }
   function normalizeServerUrl(value) {
     return (value || '').trim().replace(/\/+$/, '');
@@ -1626,17 +1693,33 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   function _onLogin() {
     _onLogin = _asyncToGenerator(function* (event) {
       event.preventDefault();
+      yield loginWithCredentials(elements.username.value.trim(), elements.password.value, 'Signing in...', 'Signed in successfully.');
+    });
+    return _onLogin.apply(this, arguments);
+  }
+  function loginFromStartupConfig() {
+    return _loginFromStartupConfig.apply(this, arguments);
+  }
+  function _loginFromStartupConfig() {
+    _loginFromStartupConfig = _asyncToGenerator(function* () {
+      yield loginWithCredentials(elements.username.value.trim(), elements.password.value, 'Signing in from remote setup...', 'Signed in from remote setup.');
+    });
+    return _loginFromStartupConfig.apply(this, arguments);
+  }
+  function loginWithCredentials(_x8, _x9, _x0, _x1) {
+    return _loginWithCredentials.apply(this, arguments);
+  }
+  function _loginWithCredentials() {
+    _loginWithCredentials = _asyncToGenerator(function* (username, password, pendingMessage, successMessage) {
       if (!state.serverUrl) {
         setStatus('Save a MoonTVPlus URL first.', 'error');
         return;
       }
-      const username = elements.username.value.trim();
-      const password = elements.password.value;
       if (!password) {
         setStatus('Password is required.', 'error');
         return;
       }
-      setStatus('Signing in...', 'info');
+      setStatus(pendingMessage || 'Signing in...', 'info');
       try {
         const payload = username ? {
           username: username,
@@ -1666,7 +1749,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
         startTVRemoteReceiver();
         elements.password.value = '';
         const syncIssues = yield refreshUserData();
-        setStatus(syncIssues.length ? 'Signed in. ' + syncIssues.join(' ') : 'Signed in successfully.', syncIssues.length ? 'info' : 'good');
+        setStatus(syncIssues.length ? 'Signed in. ' + syncIssues.join(' ') : successMessage || 'Signed in successfully.', syncIssues.length ? 'info' : 'good');
         if (elements.searchInput.value.trim()) {
           yield performSearch(elements.searchInput.value.trim());
         } else {
@@ -1676,9 +1759,9 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
         setStatus(error.message || 'Login failed.', 'error');
       }
     });
-    return _onLogin.apply(this, arguments);
+    return _loginWithCredentials.apply(this, arguments);
   }
-  function onSearch(_x8) {
+  function onSearch(_x10) {
     return _onSearch.apply(this, arguments);
   }
   function _onSearch() {
@@ -1693,7 +1776,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     });
     return _onSearch.apply(this, arguments);
   }
-  function performSearch(_x9) {
+  function performSearch(_x11) {
     return _performSearch.apply(this, arguments);
   }
   function _performSearch() {
@@ -1736,7 +1819,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     });
     return _performSearch.apply(this, arguments);
   }
-  function onSelectResult(_x0) {
+  function onSelectResult(_x12) {
     return _onSelectResult.apply(this, arguments);
   }
   function _onSelectResult() {
@@ -1820,7 +1903,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     }
     return Math.max(0, Math.min(Math.floor(rawIndex), state.detail.episodes.length - 1));
   }
-  function selectEpisode(_x1, _x10, _x11) {
+  function selectEpisode(_x13, _x14, _x15) {
     return _selectEpisode.apply(this, arguments);
   }
   function _selectEpisode() {
@@ -1873,7 +1956,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     });
     return _selectEpisode.apply(this, arguments);
   }
-  function resolvePlaybackUrl(_x12, _x13) {
+  function resolvePlaybackUrl(_x16, _x17) {
     return _resolvePlaybackUrl.apply(this, arguments);
   }
   function _resolvePlaybackUrl() {
@@ -2097,7 +2180,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       setStatus(error.message || 'Playback setup failed.', 'error');
     });
   }
-  function persistPlayRecord(_x14) {
+  function persistPlayRecord(_x18) {
     return _persistPlayRecord.apply(this, arguments);
   }
   function _persistPlayRecord() {
@@ -2232,7 +2315,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     });
     return _onLogout.apply(this, arguments);
   }
-  function apiFetch(_x15, _x16) {
+  function apiFetch(_x19, _x20) {
     return _apiFetch.apply(this, arguments);
   }
   function _apiFetch() {
@@ -2258,7 +2341,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     });
     return _apiFetch.apply(this, arguments);
   }
-  function rawFetch(_x17, _x18) {
+  function rawFetch(_x21, _x22) {
     return _rawFetch.apply(this, arguments);
   }
   function _rawFetch() {
@@ -2344,7 +2427,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     });
     return _attemptRefresh.apply(this, arguments);
   }
-  function parseErrorMessage(_x19, _x20) {
+  function parseErrorMessage(_x23, _x24) {
     return _parseErrorMessage.apply(this, arguments);
   }
   function _parseErrorMessage() {
@@ -2476,7 +2559,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       title: document.title || 'MoonTVPlus TV'
     };
   }
-  function handleRemotePlayCommand(_x21) {
+  function handleRemotePlayCommand(_x25) {
     return _handleRemotePlayCommand.apply(this, arguments);
   }
   function _handleRemotePlayCommand() {
@@ -2610,7 +2693,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     }
     return directUrl;
   }
-  function openDirectPlayCommand(_x22) {
+  function openDirectPlayCommand(_x26) {
     return _openDirectPlayCommand.apply(this, arguments);
   }
   function _openDirectPlayCommand() {
@@ -2675,7 +2758,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     });
     return _openDirectPlayCommand.apply(this, arguments);
   }
-  function openRemotePlayCommand(_x23) {
+  function openRemotePlayCommand(_x27) {
     return _openRemotePlayCommand.apply(this, arguments);
   }
   function _openRemotePlayCommand() {
