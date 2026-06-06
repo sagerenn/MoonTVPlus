@@ -11,7 +11,7 @@ on:
         type: string
   push:
     # 监听 dev 分支的推送
-    branches: [ dev ]
+    branches: [dev]
   # 取消了 pull_request 触发，因为它通常不应该触发构建和推送镜像的操作
   # 如果确实需要，可以重新加回来
   # pull_request:
@@ -20,6 +20,9 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
 
 permissions:
   contents: read # 出于安全考虑，大部分步骤只需要 read 权限
@@ -43,18 +46,17 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      # 新增步骤：根据分支动态设置镜像名称
       - name: Set image name based on branch
-        id: set_image_name
+        id: image
         run: |
-          if [[ "${{ github.ref_name }}" == "main" ]]; then
-            echo "IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/moontvplus" >> $GITHUB_ENV
-          elif [[ "${{ github.ref_name }}" == "dev" ]]; then
-            echo "IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/moontvplus-dev2" >> $GITHUB_ENV
+          repository="${GITHUB_REPOSITORY,,}"
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            image_name="${REGISTRY}/${repository}"
           else
-            # 为其他分支或手动触发设置一个默认值（可以根据需要调整）
-            echo "IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/moontvplus-dev2" >> $GITHUB_ENV
+            image_name="${REGISTRY}/${repository}-dev2"
           fi
+          echo "IMAGE_NAME=${image_name}" >> "$GITHUB_ENV"
+          echo "name=${image_name}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -62,19 +64,16 @@ jobs:
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      
-      # 这个步骤不再需要，因为我们直接用 github.repository_owner
-      # - name: Set lowercase repository owner ...
-      
+
       # 更改：使用动态镜像名和更强大的标签逻辑
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: ${{ steps.image.outputs.name }}
           tags: |
             # 1. 只有在手动触发时，才使用输入的 tag
             type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
@@ -94,7 +93,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # 更改：使用动态镜像名
-          outputs: type=image,name=${{ env.IMAGE_NAME }},name-canonical=true,push=true
+          outputs: type=image,name=${{ steps.image.outputs.name }},name-canonical=true,push=true
 
       - name: Export digest
         run: |
@@ -122,24 +121,24 @@ jobs:
           pattern: digests-*
           merge-multiple: true
 
-      # 新增步骤：在 merge 任务中也需要设置同样的镜像名称
       - name: Set image name based on branch
-        id: set_image_name
+        id: image
         run: |
-          if [[ "${{ github.ref_name }}" == "main" ]]; then
-            echo "IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/moontvplus" >> $GITHUB_ENV
-          elif [[ "${{ github.ref_name }}" == "dev" ]]; then
-            echo "IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/moontvplus-dev2" >> $GITHUB_ENV
+          repository="${GITHUB_REPOSITORY,,}"
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            image_name="${REGISTRY}/${repository}"
           else
-            echo "IMAGE_NAME=ghcr.io/${{ github.repository_owner }}/moontvplus-dev2" >> $GITHUB_ENV
+            image_name="${REGISTRY}/${repository}-dev2"
           fi
+          echo "IMAGE_NAME=${image_name}" >> "$GITHUB_ENV"
+          echo "name=${image_name}" >> "$GITHUB_OUTPUT"
 
       # 新增步骤：在 merge 任务中也需要生成同样的标签列表
       - name: Extract metadata for manifest
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: ${{ steps.image.outputs.name }}
           tags: |
             type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
             type=ref,event=branch
@@ -151,19 +150,20 @@ jobs:
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
         run: |
-          # 更改：使用从 meta 生成的所有标签来创建 manifest
-          # 将逗号分隔的标签列表转换为 ' -t <tag1> -t <tag2> ...' 的格式
-          FORMATTED_TAGS=$(echo "${{ steps.meta.outputs.tags }}" | sed 's/,/ -t /g')
-          
-          docker buildx imagetools create -t $FORMATTED_TAGS \
-            $(printf '${{ env.IMAGE_NAME }}@sha256:%s ' *)
+          tag_args=()
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] && tag_args+=("-t" "$tag")
+          done <<< "${{ steps.meta.outputs.tags }}"
+
+          docker buildx imagetools create "${tag_args[@]}" \
+            $(printf "${IMAGE_NAME}@sha256:%s " *)
 
   cleanup-refresh:
     runs-on: ubuntu-latest
