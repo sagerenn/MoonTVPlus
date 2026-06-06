@@ -44,6 +44,11 @@ import {
   savePlayRecord,
 } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
+import type {
+  TVRemoteDanmakuItem,
+  TVRemotePlayCommand,
+  TVRemoteSyncCommand,
+} from '@/lib/tv-remote-types';
 import {
   convertDanmakuFormat,
   getDanmakuById,
@@ -69,6 +74,8 @@ const TV_DANMAKU_MAX_ITEMS = 3000;
 const TV_DANMAKU_SETTINGS_KEY = 'tv_danmaku_settings';
 const TV_VOLUME_KEY = 'tv_player_volume';
 const TV_MUTED_KEY = 'tv_player_muted';
+const REMOTE_PLAY_COMMAND_KEY = 'moontv_tv_remote_play_command';
+const REMOTE_SYNC_EVENT = 'moontv:tv-remote-sync';
 const REMOTE_KEY_DEDUPE_MS = 350;
 
 type TVDanmakuSettings = {
@@ -182,6 +189,37 @@ function getDanmakuSettingField(
   return null;
 }
 
+function consumeRemotePlayCommand(): TVRemotePlayCommand | null {
+  if (typeof window === 'undefined') return null;
+
+  const raw = sessionStorage.getItem(REMOTE_PLAY_COMMAND_KEY);
+  if (!raw) return null;
+
+  sessionStorage.removeItem(REMOTE_PLAY_COMMAND_KEY);
+  try {
+    const command = JSON.parse(raw) as TVRemotePlayCommand;
+    return command && typeof command === 'object' ? command : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRemoteDanmakuItems(
+  items?: TVRemoteDanmakuItem[]
+): Array<{ text: string; time: number; color: string; mode: number }> {
+  if (!Array.isArray(items)) return [];
+
+  return items
+    .map((item) => ({
+      text: String(item?.text || '').slice(0, 240),
+      time: Number(item?.time || 0),
+      color: String(item?.color || '#ffffff'),
+      mode: Number(item?.mode || 0),
+    }))
+    .filter((item) => item.text && Number.isFinite(item.time) && item.time >= 0)
+    .slice(0, TV_DANMAKU_MAX_ITEMS);
+}
+
 function getFocusableElementsInScope(scope: HTMLElement) {
   return Array.from(
     scope.querySelectorAll<HTMLElement>(
@@ -217,6 +255,9 @@ function moveFocusWithinScope(scope: HTMLElement, direction: 'up' | 'down') {
 function TVPlayClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const [remotePlayCommand] = useState<TVRemotePlayCommand | null>(() =>
+    consumeRemotePlayCommand()
+  );
   const [detail, setDetail] = useState<SearchResult | null>(null);
   const [sources, setSources] = useState<SearchResult[]>([]);
   const [episodeIndex, setEpisodeIndex] = useState(0);
@@ -278,6 +319,9 @@ function TVPlayClient() {
     if (typeof window === 'undefined') return 1;
     return Number(localStorage.getItem('tv_playback_rate') || '1') || 1;
   });
+  const [remoteAutoPlay, setRemoteAutoPlay] = useState(
+    () => remotePlayCommand?.playback?.paused !== true
+  );
   const [skipConfig, setSkipConfig] = useState<{
     enable?: boolean;
     intro_time?: number;
@@ -311,7 +355,12 @@ function TVPlayClient() {
   const id = searchParams.get('id');
   const title = searchParams.get('title');
   const fileName = searchParams.get('fileName');
-  const initialIndex = Number(searchParams.get('index') || '0');
+  const initialIndex = Number(
+    searchParams.get('index') ??
+      (typeof remotePlayCommand?.index === 'number'
+        ? String(remotePlayCommand.index)
+        : '0')
+  );
 
   useEffect(() => {
     let alive = true;
@@ -324,6 +373,9 @@ function TVPlayClient() {
         setSources(data.sources);
         const maxIndex = Math.max(0, (data.detail.episodes?.length || 1) - 1);
         const explicitIndex = searchParams.has('index');
+        const remotePlayback = remotePlayCommand?.playback;
+        const remoteStartTime = Number(remotePlayback?.currentTime || 0);
+        const remoteRate = Number(remotePlayback?.playbackRate || 0);
         let safeIndex = Math.max(
           0,
           Math.min(
@@ -331,7 +383,32 @@ function TVPlayClient() {
             maxIndex
           )
         );
-        if (!explicitIndex && data.detail.source && data.detail.id) {
+        if (Number.isFinite(remoteRate) && remoteRate > 0) {
+          setPlaybackRate(Math.max(0.5, Math.min(4, remoteRate)));
+        }
+        setRemoteAutoPlay(remotePlayback?.paused !== true);
+
+        if (remotePlayCommand?.danmaku?.enabled !== undefined) {
+          setDanmakuEnabled(remotePlayCommand.danmaku.enabled !== false);
+        }
+        if (remotePlayCommand?.danmaku?.settings) {
+          const settings = remotePlayCommand.danmaku.settings;
+          setDanmakuSettings((prev) => ({
+            ...prev,
+            fontSize:
+              typeof settings.fontSize === 'number'
+                ? Math.max(20, Math.min(46, settings.fontSize))
+                : prev.fontSize,
+            opacity:
+              typeof settings.opacity === 'number'
+                ? Math.max(0.25, Math.min(1, settings.opacity))
+                : prev.opacity,
+          }));
+        }
+
+        if (Number.isFinite(remoteStartTime) && remoteStartTime > 1) {
+          setStartTime(remoteStartTime);
+        } else if (!explicitIndex && data.detail.source && data.detail.id) {
           getAllPlayRecords()
             .then((records) => {
               if (!alive) return;
@@ -361,7 +438,7 @@ function TVPlayClient() {
     return () => {
       alive = false;
     };
-  }, [source, id, title, fileName, initialIndex]);
+  }, [source, id, title, fileName, initialIndex, remotePlayCommand, searchParams]);
 
   useEffect(() => {
     let alive = true;
@@ -438,6 +515,21 @@ function TVPlayClient() {
       spawnedDanmakuRef.current.clear();
       lastDanmakuTimeRef.current = timeRef.current.current;
       if (!danmakuEnabled || !detail?.title) return;
+
+      const remoteComments =
+        (typeof remotePlayCommand?.index !== 'number' ||
+          remotePlayCommand.index === episodeIndex)
+          ? normalizeRemoteDanmakuItems(remotePlayCommand?.danmaku?.comments)
+          : [];
+      if (remoteComments.length > 0) {
+        lastDanmakuTimeRef.current = Math.max(
+          0,
+          timeRef.current.current - TV_DANMAKU_SEEK_WINDOW - 1
+        );
+        setDanmakuItems(remoteComments);
+        return;
+      }
+
       try {
         const search = await searchAnime(title || detail.title);
         const anime = search.animes?.[0];
@@ -479,7 +571,7 @@ function TVPlayClient() {
     return () => {
       alive = false;
     };
-  }, [danmakuEnabled, detail?.title, episodeIndex, title]);
+  }, [danmakuEnabled, detail?.title, episodeIndex, remotePlayCommand, title]);
 
   useEffect(() => {
     if (!danmakuEnabled || danmakuItems.length === 0) {
@@ -678,6 +770,119 @@ function TVPlayClient() {
     video.currentTime = next;
     showSeekOverlay(next, duration, 0);
   };
+
+  const applyRemoteDanmakuPayload = useCallback(
+    (command: TVRemotePlayCommand | TVRemoteSyncCommand) => {
+      if (command.danmaku?.enabled !== undefined) {
+        setDanmakuEnabled(command.danmaku.enabled !== false);
+      }
+
+      if (command.danmaku?.settings) {
+        const settings = command.danmaku.settings;
+        setDanmakuSettings((prev) => ({
+          ...prev,
+          fontSize:
+            typeof settings.fontSize === 'number'
+              ? Math.max(20, Math.min(46, settings.fontSize))
+              : prev.fontSize,
+          opacity:
+            typeof settings.opacity === 'number'
+              ? Math.max(0.25, Math.min(1, settings.opacity))
+              : prev.opacity,
+        }));
+      }
+
+      const comments = normalizeRemoteDanmakuItems(command.danmaku?.comments);
+      if (comments.length > 0) {
+        setActiveDanmakuItems([]);
+        spawnedDanmakuRef.current.clear();
+        lastDanmakuTimeRef.current = Math.max(
+          0,
+          timeRef.current.current - TV_DANMAKU_SEEK_WINDOW - 1
+        );
+        setDanmakuItems(comments);
+      }
+    },
+    []
+  );
+
+  const applyRemoteSyncCommand = useCallback(
+    (command: TVRemoteSyncCommand) => {
+      if (!command) return;
+      if (
+        detail?.source &&
+        command.source &&
+        command.source !== detail.source
+      ) {
+        return;
+      }
+      if (detail?.id && command.id && command.id !== detail.id) {
+        return;
+      }
+
+      applyRemoteDanmakuPayload(command);
+
+      const nextRate = Number(command.playbackRate || 0);
+      if (Number.isFinite(nextRate) && nextRate > 0) {
+        setPlaybackRate(Math.max(0.5, Math.min(4, nextRate)));
+      }
+
+      const nextTime = Number(command.currentTime || 0);
+      const hasNextTime = Number.isFinite(nextTime) && nextTime >= 0;
+      const nextIndex =
+        typeof command.index === 'number' && Number.isFinite(command.index)
+          ? Math.max(0, Math.floor(command.index))
+          : null;
+
+      if (
+        detail?.episodes?.length &&
+        nextIndex !== null &&
+        nextIndex !== episodeIndex
+      ) {
+        const safeIndex = Math.max(
+          0,
+          Math.min(detail.episodes.length - 1, nextIndex)
+        );
+        setStartTime(hasNextTime ? nextTime : 0);
+        setRemoteAutoPlay(command.paused !== true);
+        setEpisodeIndex(safeIndex);
+        setEpisodePage(Math.floor(safeIndex / 30));
+        return;
+      }
+
+      const video = document.querySelector<HTMLVideoElement>(
+        '[data-tv-player-root] video'
+      );
+      if (video) {
+        if (hasNextTime && Math.abs((video.currentTime || 0) - nextTime) > 1.2) {
+          const duration = Number.isFinite(video.duration)
+            ? video.duration || 0
+            : 0;
+          video.currentTime =
+            duration > 0 ? Math.max(0, Math.min(duration, nextTime)) : nextTime;
+        }
+
+        if (command.paused === true) {
+          video.pause();
+        } else if (command.paused === false) {
+          video.play().catch(() => undefined);
+        }
+      }
+
+      setRemoteAutoPlay(command.paused !== true);
+    },
+    [applyRemoteDanmakuPayload, detail, episodeIndex]
+  );
+
+  useEffect(() => {
+    const onRemoteSync = (event: Event) => {
+      const command = (event as CustomEvent<TVRemoteSyncCommand>).detail;
+      applyRemoteSyncCommand(command);
+    };
+
+    window.addEventListener(REMOTE_SYNC_EVENT, onRemoteSync);
+    return () => window.removeEventListener(REMOTE_SYNC_EVENT, onRemoteSync);
+  }, [applyRemoteSyncCommand]);
 
   const setVideoVolume = (next: number) => {
     const safe = Math.max(0, Math.min(1, next));
@@ -1065,6 +1270,7 @@ function TVPlayClient() {
           onTime={onTime}
           command={toggleCommand}
           startTime={startTime}
+          autoPlay={remoteAutoPlay}
           onError={() => setPlaybackError(true)}
           onPlayingChange={setIsPlaying}
           onBufferingChange={setIsBuffering}

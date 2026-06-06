@@ -33,6 +33,41 @@ export interface TVRemoteTextCommand {
   text?: string;
 }
 
+export interface TVRemoteDanmakuItem {
+  text: string;
+  time: number;
+  color?: string;
+  mode?: number;
+}
+
+export interface TVRemoteDanmakuPayload {
+  enabled?: boolean;
+  selection?: {
+    animeId?: number;
+    episodeId?: number;
+    animeTitle?: string;
+    episodeTitle?: string;
+    searchKeyword?: string;
+  };
+  settings?: {
+    opacity?: number;
+    fontSize?: number;
+    speed?: number;
+    marginTop?: number;
+    marginBottom?: number | string;
+    synchronousPlayback?: boolean;
+  };
+  comments?: TVRemoteDanmakuItem[];
+}
+
+export interface TVRemotePlaybackState {
+  currentTime?: number;
+  duration?: number;
+  playbackRate?: number;
+  paused?: boolean;
+  updatedAt?: number;
+}
+
 export interface TVRemotePlayCommand {
   source?: string;
   id?: string;
@@ -40,4 +75,14 @@ export interface TVRemotePlayCommand {
   searchTitle?: string;
   fileName?: string;
   index?: number;
+  playback?: TVRemotePlaybackState;
+  danmaku?: TVRemoteDanmakuPayload;
+}
+
+export interface TVRemoteSyncCommand extends TVRemotePlaybackState {
+  source?: string;
+  id?: string;
+  index?: number;
+  title?: string;
+  danmaku?: TVRemoteDanmakuPayload;
 }

@@ -11,10 +11,13 @@ import {
 import type {
   TVRemoteKeyCommand,
   TVRemotePlayCommand,
+  TVRemoteSyncCommand,
   TVRemoteTextCommand,
 } from '@/lib/tv-remote-types';
 
 const DEVICE_ID_KEY = 'moontv_tv_remote_device_id';
+const PENDING_PLAY_COMMAND_KEY = 'moontv_tv_remote_play_command';
+const REMOTE_SYNC_EVENT = 'moontv:tv-remote-sync';
 
 type TVRemoteReceiverSingleton = {
   socket: Socket | null;
@@ -60,6 +63,8 @@ function buildTVPlayUrl(command: TVRemotePlayCommand) {
   if (typeof command.index === 'number' && Number.isFinite(command.index)) {
     params.set('index', String(Math.max(0, Math.floor(command.index))));
   }
+  params.set('remote', '1');
+  params.set('_remoteTs', String(Date.now()));
   return `/tv/play?${params.toString()}`;
 }
 
@@ -121,7 +126,19 @@ export default function TVRemoteReceiver() {
     });
     socket.on('tv-remote:play', (command: TVRemotePlayCommand) => {
       if (!command?.title && !command?.id) return;
+      try {
+        sessionStorage.setItem(PENDING_PLAY_COMMAND_KEY, JSON.stringify(command));
+      } catch {
+        // A plain URL cast still works without optional playback/danmaku state.
+      }
       window.location.href = buildTVPlayUrl(command);
+    });
+    socket.on('tv-remote:sync', (command: TVRemoteSyncCommand) => {
+      window.dispatchEvent(
+        new CustomEvent<TVRemoteSyncCommand>(REMOTE_SYNC_EVENT, {
+          detail: command,
+        })
+      );
     });
 
     const interval = window.setInterval(updateState, 10000);
@@ -140,6 +157,7 @@ export default function TVRemoteReceiver() {
       socket.off('tv-remote:key');
       socket.off('tv-remote:text');
       socket.off('tv-remote:play');
+      socket.off('tv-remote:sync');
       receiverState.refCount = Math.max(0, receiverState.refCount - 1);
       if (receiverState.refCount === 0) {
         receiverState.disconnectTimer = window.setTimeout(() => {

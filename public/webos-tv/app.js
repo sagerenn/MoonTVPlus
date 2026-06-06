@@ -69,6 +69,15 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   let tvRemoteStateTimer = 0;
   let socketIoLibraryPromise = null;
   let startupConfig = null;
+  let pendingRemotePlaybackState = null;
+  let remoteDanmakuItems = [];
+  let remoteDanmakuEnabled = true;
+  let remoteDanmakuSettings = {
+    fontSize: 30,
+    opacity: 0.75
+  };
+  let remoteDanmakuSpawned = {};
+  let remoteDanmakuLastTime = 0;
   function installCompatibilityPolyfills() {
     if (!Object.assign) {
       Object.assign = function (target) {
@@ -230,6 +239,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     elements.playerPanel = document.getElementById('player-panel');
     elements.playerShell = document.getElementById('player-shell');
     elements.player = document.getElementById('player');
+    elements.playerDanmakuLayer = document.getElementById('player-danmaku-layer');
     elements.playerSummary = document.getElementById('player-summary');
     elements.playerOverlayTitle = document.getElementById('player-overlay-title');
     elements.playerEngineBadge = document.getElementById('player-engine-badge');
@@ -2109,7 +2119,9 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       maybeRunPendingAutoplay();
       return;
     }
-    if (!suppressResumeSeekForCurrentLoad) {
+    if (pendingRemotePlaybackState) {
+      applyPendingRemotePlaybackState();
+    } else if (!suppressResumeSeekForCurrentLoad) {
       const key = buildStorageKey(state.detail.source, state.detail.id);
       const record = state.history[key];
       if (record && record.index === state.selectedEpisodeIndex + 1 && Number(record.play_time) > 5 && Number(record.total_time || 0) > Number(record.play_time)) {
@@ -2129,9 +2141,13 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   function onPlayerLoadStart() {
     resetSubtitleDefaults();
     renderSubtitleTracks();
+    remoteDanmakuSpawned = {};
+    remoteDanmakuLastTime = 0;
+    clearRemoteDanmakuLayer();
   }
   function onPlayerTimeUpdate() {
     clearNativeHlsFallbackTimer();
+    updateRemoteDanmakuOverlay();
     if (suppressResumeSeekForCurrentLoad && Number(elements.player.currentTime || 0) > 1) {
       suppressResumeSeekForCurrentLoad = false;
     }
@@ -2154,6 +2170,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     });
   }
   function onPlayerPause() {
+    updateRemoteDanmakuAnimationState();
     if (elements.player.currentTime > 0 && !elements.player.ended) {
       persistPlayRecord(false).catch(function () {
         return null;
@@ -2488,6 +2505,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       tvRemoteSocket.on('tv-remote:key', dispatchSyntheticKey);
       tvRemoteSocket.on('tv-remote:text', applyRemoteText);
       tvRemoteSocket.on('tv-remote:play', handleRemotePlayCommand);
+      tvRemoteSocket.on('tv-remote:sync', handleRemoteSyncCommand);
       window.clearInterval(tvRemoteStateTimer);
       tvRemoteStateTimer = window.setInterval(updateTVRemoteState, 10000);
       document.addEventListener('visibilitychange', updateTVRemoteState);
@@ -2578,6 +2596,194 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       }
     });
     return _handleRemotePlayCommand.apply(this, arguments);
+  }
+  function handleRemoteSyncCommand(_x26) {
+    return _handleRemoteSyncCommand.apply(this, arguments);
+  }
+  function _handleRemoteSyncCommand() {
+    _handleRemoteSyncCommand = _asyncToGenerator(function* (command) {
+      try {
+        command = command || {};
+        if (!state.detail || isDifferentRemoteVideo(command)) {
+          yield handleRemotePlayCommand(command);
+          return;
+        }
+        applyRemoteDanmakuPayload(command);
+        const requestedIndex = Number(command.index);
+        if (isFinite(requestedIndex) && Math.floor(requestedIndex) !== state.selectedEpisodeIndex && Array.isArray(state.detail.episodes)) {
+          pendingRemotePlaybackState = normalizeRemotePlaybackState(command);
+          yield selectEpisode(Math.floor(requestedIndex), false, {
+            autoplay: pendingRemotePlaybackState.paused !== true,
+            resume: false
+          });
+        } else {
+          applyRemotePlaybackState(command);
+        }
+        setStatus('TV playback synced.', 'good');
+      } catch (error) {
+        setStatus(error.message || 'Failed to sync TV playback.', 'error');
+      }
+    });
+    return _handleRemoteSyncCommand.apply(this, arguments);
+  }
+  function isDifferentRemoteVideo(command) {
+    const commandSource = String(command && command.source || '').trim();
+    const commandId = String(command && command.id || '').trim();
+    if (!commandSource && !commandId) {
+      return false;
+    }
+    return commandSource && commandSource !== String(state.detail && state.detail.source || '') || commandId && commandId !== String(state.detail && state.detail.id || '');
+  }
+  function normalizeRemotePlaybackState(command) {
+    const playback = command && command.playback ? command.playback : command || {};
+    const currentTime = Number(playback.currentTime || 0);
+    const duration = Number(playback.duration || 0);
+    const playbackRate = Number(playback.playbackRate || 1);
+    return {
+      currentTime: isFinite(currentTime) && currentTime >= 0 ? currentTime : 0,
+      duration: isFinite(duration) && duration >= 0 ? duration : 0,
+      playbackRate: isFinite(playbackRate) && playbackRate > 0 ? Math.max(0.5, Math.min(4, playbackRate)) : 1,
+      paused: playback.paused === true,
+      updatedAt: Number(playback.updatedAt || Date.now())
+    };
+  }
+  function applyRemotePlaybackState(command) {
+    const playback = normalizeRemotePlaybackState(command);
+    pendingRemotePlaybackState = playback;
+    applyPendingRemotePlaybackState();
+  }
+  function applyPendingRemotePlaybackState() {
+    if (!pendingRemotePlaybackState || !elements.player) {
+      return false;
+    }
+    const playback = pendingRemotePlaybackState;
+    try {
+      elements.player.playbackRate = playback.playbackRate || 1;
+    } catch (error) {}
+    if (elements.player.readyState < 1) {
+      return false;
+    }
+    const currentTime = Number(elements.player.currentTime || 0);
+    const duration = Number(elements.player.duration || 0);
+    if (playback.currentTime > 0 && Math.abs(currentTime - playback.currentTime) > 1.2) {
+      try {
+        elements.player.currentTime = duration > 0 && isFinite(duration) ? Math.max(0, Math.min(duration, playback.currentTime)) : playback.currentTime;
+      } catch (error) {
+        return false;
+      }
+    }
+    if (playback.paused) {
+      elements.player.pause();
+    } else {
+      elements.player.play().catch(function () {
+        setPlayerHint('Press OK', 1200);
+      });
+    }
+    pendingRemotePlaybackState = null;
+    updatePlayerOverlay();
+    return true;
+  }
+  function normalizeRemoteDanmakuItems(items) {
+    if (!Array.isArray(items)) {
+      return [];
+    }
+    return items.map(function (item) {
+      return {
+        text: String(item && item.text || '').slice(0, 240),
+        time: Number(item && item.time || 0),
+        color: String(item && item.color || '#ffffff'),
+        mode: Number(item && item.mode || 0)
+      };
+    }).filter(function (item) {
+      return item.text && isFinite(item.time) && item.time >= 0;
+    }).slice(0, 3000);
+  }
+  function applyRemoteDanmakuPayload(command) {
+    const danmaku = command && command.danmaku;
+    if (!danmaku) {
+      return;
+    }
+    remoteDanmakuEnabled = danmaku.enabled !== false;
+    if (danmaku.settings) {
+      const fontSize = Number(danmaku.settings.fontSize || remoteDanmakuSettings.fontSize);
+      const opacity = Number(danmaku.settings.opacity || remoteDanmakuSettings.opacity);
+      remoteDanmakuSettings = {
+        fontSize: isFinite(fontSize) ? Math.max(20, Math.min(46, fontSize)) : remoteDanmakuSettings.fontSize,
+        opacity: isFinite(opacity) ? Math.max(0.25, Math.min(1, opacity)) : remoteDanmakuSettings.opacity
+      };
+    }
+    const comments = normalizeRemoteDanmakuItems(danmaku.comments);
+    if (comments.length > 0) {
+      remoteDanmakuItems = comments;
+      remoteDanmakuSpawned = {};
+      remoteDanmakuLastTime = Math.max(0, Number(elements.player && elements.player.currentTime || 0) - 9);
+      clearRemoteDanmakuLayer();
+    } else if (!remoteDanmakuEnabled) {
+      clearRemoteDanmakuLayer();
+    }
+  }
+  function clearRemoteDanmakuLayer() {
+    if (elements.playerDanmakuLayer) {
+      elements.playerDanmakuLayer.innerHTML = '';
+    }
+  }
+  function updateRemoteDanmakuAnimationState() {
+    if (!elements.playerDanmakuLayer) {
+      return;
+    }
+    const stateValue = elements.player.paused ? 'paused' : 'running';
+    Array.from(elements.playerDanmakuLayer.children).forEach(function (node) {
+      if (node && node.style) {
+        node.style.animationPlayState = stateValue;
+      }
+    });
+  }
+  function getRemoteDanmakuDuration(text) {
+    return Math.max(6, 12 - Math.min(6, String(text || '').length / 6));
+  }
+  function updateRemoteDanmakuOverlay() {
+    if (!remoteDanmakuEnabled || !remoteDanmakuItems.length || !elements.playerDanmakuLayer) {
+      return;
+    }
+    const current = Number(elements.player.currentTime || 0);
+    const previous = remoteDanmakuLastTime;
+    const jumped = current < previous - 1 || current - previous > 2;
+    const spawnWindow = jumped ? 8 : Math.max(0.6, current - previous + 0.2);
+    const laneCount = 8;
+    if (jumped) {
+      remoteDanmakuSpawned = {};
+      clearRemoteDanmakuLayer();
+    }
+    remoteDanmakuItems.map(function (item, index) {
+      return {
+        id: String(index) + '-' + String(item.time) + '-' + item.text,
+        text: item.text,
+        time: item.time,
+        color: item.color,
+        lane: index % laneCount
+      };
+    }).filter(function (item) {
+      const delta = jumped ? Math.abs(item.time - current) : current - item.time;
+      return delta >= 0 && delta <= spawnWindow && !remoteDanmakuSpawned[item.id];
+    }).slice(0, laneCount).forEach(function (item) {
+      const node = document.createElement('div');
+      node.className = 'player-danmaku-item';
+      node.textContent = item.text;
+      node.style.top = String(item.lane * 12) + '%';
+      node.style.color = item.color || '#ffffff';
+      node.style.fontSize = String(remoteDanmakuSettings.fontSize) + 'px';
+      node.style.opacity = String(remoteDanmakuSettings.opacity);
+      node.style.animation = 'webos-danmaku ' + String(getRemoteDanmakuDuration(item.text)) + 's linear forwards';
+      node.style.animationPlayState = elements.player.paused ? 'paused' : 'running';
+      node.addEventListener('animationend', function () {
+        if (node.parentNode) {
+          node.parentNode.removeChild(node);
+        }
+      });
+      remoteDanmakuSpawned[item.id] = true;
+      elements.playerDanmakuLayer.appendChild(node);
+    });
+    remoteDanmakuLastTime = current;
   }
   function shouldReloadForRemotePlay(command) {
     if (!isWebOSBrowser() || !state.isHostedOnSameOrigin || !command || command.__reloaded) {
@@ -2693,7 +2899,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     }
     return directUrl;
   }
-  function openDirectPlayCommand(_x26) {
+  function openDirectPlayCommand(_x27) {
     return _openDirectPlayCommand.apply(this, arguments);
   }
   function _openDirectPlayCommand() {
@@ -2746,8 +2952,10 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       renderResults();
       renderDetail();
       renderEpisodes();
+      applyRemoteDanmakuPayload(command);
+      pendingRemotePlaybackState = normalizeRemotePlaybackState(command);
       yield selectEpisode(0, false, {
-        autoplay: true,
+        autoplay: pendingRemotePlaybackState.paused !== true,
         resume: false
       });
       setStatus('Casting ' + state.detail.title + ' to TV.', 'good');
@@ -2758,7 +2966,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     });
     return _openDirectPlayCommand.apply(this, arguments);
   }
-  function openRemotePlayCommand(_x27) {
+  function openRemotePlayCommand(_x28) {
     return _openRemotePlayCommand.apply(this, arguments);
   }
   function _openRemotePlayCommand() {
@@ -2825,8 +3033,10 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       renderResults();
       renderDetail();
       renderEpisodes();
+      applyRemoteDanmakuPayload(command);
+      pendingRemotePlaybackState = normalizeRemotePlaybackState(command);
       yield selectEpisode(safeIndex, false, {
-        autoplay: true,
+        autoplay: pendingRemotePlaybackState.paused !== true,
         resume: false
       });
       setStatus('Casting ' + (state.detail.title || state.selectedResult.title || 'video') + ' to TV.', 'good');
@@ -2851,6 +3061,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   }
   function onPlayerStateChange() {
     updatePlayerOverlay();
+    updateRemoteDanmakuAnimationState();
     if (!elements.player.paused && state.playerUrl) {
       revealPlayerControls();
     }
