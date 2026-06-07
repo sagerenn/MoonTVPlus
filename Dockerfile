@@ -1,8 +1,16 @@
 # ---- 第 1 阶段：安装依赖 ----
 FROM node:24-alpine AS deps
 
+ARG ALPINE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/alpine
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
+RUN sed -i "s#https\\?://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk/repositories \
+  && apk add --no-cache python3 make g++
+
 # 启用 corepack 并激活 pnpm（Node20 默认提供 corepack）
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN npm config set registry "$NPM_REGISTRY" \
+  && npm install -g pnpm@10.14.0 \
+  && pnpm config set registry "$NPM_REGISTRY"
 
 WORKDIR /app
 
@@ -14,7 +22,13 @@ RUN pnpm install --frozen-lockfile
 
 # ---- 第 2 阶段：构建项目 ----
 FROM node:24-alpine AS builder
-RUN corepack enable && corepack prepare pnpm@latest --activate
+ARG ALPINE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/alpine
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+RUN sed -i "s#https\\?://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk/repositories \
+  && apk add --no-cache python3 make g++
+RUN npm config set registry "$NPM_REGISTRY" \
+  && npm install -g pnpm@10.14.0 \
+  && pnpm config set registry "$NPM_REGISTRY"
 WORKDIR /app
 
 # 复制依赖
@@ -34,8 +48,16 @@ RUN pnpm deploy --filter=. --prod --legacy /tmp/prod-deps
 # ---- 第 3 阶段：生成运行时镜像 ----
 FROM node:24-alpine AS runner
 
+ARG ALPINE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/alpine
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
+RUN sed -i "s#https\\?://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk/repositories \
+  && apk add --no-cache ffmpeg
+
 # 启用 corepack 并激活 pnpm（用于安装额外依赖）
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN npm config set registry "$NPM_REGISTRY" \
+  && npm install -g pnpm@10.14.0 \
+  && pnpm config set registry "$NPM_REGISTRY"
 
 # 创建非 root 用户
 RUN addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs

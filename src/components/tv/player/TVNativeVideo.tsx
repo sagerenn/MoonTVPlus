@@ -63,6 +63,7 @@ export default function TVNativeVideo({
   adFilterEnabled = false,
   playbackRate = 1,
   startTime = 0,
+  autoPlay = true,
   command,
   sourceType,
   className = '',
@@ -78,6 +79,7 @@ export default function TVNativeVideo({
   adFilterEnabled?: boolean;
   playbackRate?: number;
   startTime?: number;
+  autoPlay?: boolean;
   command?: number;
   sourceType?: SourceType;
   className?: string;
@@ -230,7 +232,9 @@ export default function TVNativeVideo({
         videoEl.setAttribute('webkit-playsinline', 'true');
         videoEl.playbackRate = playbackRate;
         videoEl.muted = false;
-        playSafely();
+        if (autoPlay) {
+          playSafely();
+        }
       } catch (err) {
         console.error('[TVNativeVideo] attach failed:', err);
         setError('播放器初始化失败');
@@ -320,7 +324,7 @@ export default function TVNativeVideo({
       clearBuffering();
       cleanup();
     };
-  }, [url, live, startTime, adFilterEnabled, playbackRate, sourceType]);
+  }, [url, live, startTime, adFilterEnabled, playbackRate, autoPlay, sourceType]);
 
   useEffect(() => {
     const video = videoRef.current;

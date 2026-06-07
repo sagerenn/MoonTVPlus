@@ -1,7 +1,14 @@
 # ---- 第 1 阶段：安装依赖 ----
 FROM node:24-alpine AS deps
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+ARG ALPINE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/alpine
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
+RUN sed -i "s#https\\?://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk/repositories \
+  && apk add --no-cache python3 make g++ \
+  && npm config set registry "$NPM_REGISTRY" \
+  && npm install -g pnpm@10.14.0 \
+  && pnpm config set registry "$NPM_REGISTRY"
 
 WORKDIR /app
 
@@ -11,7 +18,13 @@ RUN pnpm install --frozen-lockfile
 
 # ---- 第 2 阶段：构建项目 ----
 FROM node:24-alpine AS builder
-RUN corepack enable && corepack prepare pnpm@latest --activate
+ARG ALPINE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/alpine
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+RUN sed -i "s#https\\?://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk/repositories \
+  && apk add --no-cache python3 make g++ \
+  && npm config set registry "$NPM_REGISTRY" \
+  && npm install -g pnpm@10.14.0 \
+  && pnpm config set registry "$NPM_REGISTRY"
 WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
@@ -27,6 +40,13 @@ RUN pnpm run build
 
 # ---- 第 3 阶段：生成 lite 运行时镜像 ----
 FROM node:24-alpine AS runner
+
+ARG ALPINE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/alpine
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
+RUN sed -i "s#https\\?://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk/repositories \
+  && apk add --no-cache ffmpeg \
+  && npm config set registry "$NPM_REGISTRY"
 
 RUN addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
 

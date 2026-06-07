@@ -57,6 +57,9 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   let forcedHlsSource = '';
   let failedHlsSource = '';
   let nativeHlsFallbackTimer = 0;
+  let playbackDebugEvents = [];
+  let lastHlsErrorDebug = null;
+  let lastPlayerErrorDebug = null;
   let playerControlsOpen = true;
   let playerIdleTimer = 0;
   let playerHintTimer = 0;
@@ -69,6 +72,26 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   let tvRemoteStateTimer = 0;
   let socketIoLibraryPromise = null;
   let startupConfig = null;
+  let pendingRemotePlaybackState = null;
+  let remoteCastFullscreenActive = false;
+  let nativeFullscreenRequestTimer = 0;
+  let webOSCompatibilityPlaybackOffset = 0;
+  let renderedPlaybackActive = false;
+  let renderedPlaybackSource = '';
+  let renderedPlaybackPaused = true;
+  let renderedPlaybackRate = 1;
+  let renderedPlaybackStartOriginalTime = 0;
+  let renderedPlaybackStartedAt = 0;
+  let renderedPlaybackDuration = 0;
+  let renderedPlaybackTicker = 0;
+  let remoteDanmakuItems = [];
+  let remoteDanmakuEnabled = true;
+  let remoteDanmakuSettings = {
+    fontSize: 30,
+    opacity: 0.75
+  };
+  let remoteDanmakuSpawned = {};
+  let remoteDanmakuLastTime = 0;
   function installCompatibilityPolyfills() {
     if (!Object.assign) {
       Object.assign = function (target) {
@@ -157,6 +180,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   }
   function init() {
     cacheElements();
+    installPlaybackDebugHook();
     startupConfig = consumeStartupConfig();
     bindEvents();
     hydrateState();
@@ -230,6 +254,8 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     elements.playerPanel = document.getElementById('player-panel');
     elements.playerShell = document.getElementById('player-shell');
     elements.player = document.getElementById('player');
+    elements.renderedPlayer = document.getElementById('rendered-player');
+    elements.playerDanmakuLayer = document.getElementById('player-danmaku-layer');
     elements.playerSummary = document.getElementById('player-summary');
     elements.playerOverlayTitle = document.getElementById('player-overlay-title');
     elements.playerEngineBadge = document.getElementById('player-engine-badge');
@@ -283,6 +309,16 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     player.addEventListener('ended', onPlayerEnded);
     player.addEventListener('pause', onPlayerPause);
     player.addEventListener('error', onPlayerError);
+    player.addEventListener('loadeddata', onPlayerMediaEvent);
+    player.addEventListener('canplay', onPlayerMediaEvent);
+    player.addEventListener('canplaythrough', onPlayerMediaEvent);
+    player.addEventListener('waiting', onPlayerMediaEvent);
+    player.addEventListener('stalled', onPlayerMediaEvent);
+    player.addEventListener('suspend', onPlayerMediaEvent);
+    player.addEventListener('abort', onPlayerMediaEvent);
+    player.addEventListener('emptied', onPlayerMediaEvent);
+    player.addEventListener('seeking', onPlayerMediaEvent);
+    player.addEventListener('seeked', onPlayerMediaEvent);
     player.addEventListener('play', onPlayerStateChange);
     player.addEventListener('playing', onPlayerStateChange);
     player.addEventListener('volumechange', onPlayerStateChange);
@@ -299,6 +335,16 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     player.removeEventListener('ended', onPlayerEnded);
     player.removeEventListener('pause', onPlayerPause);
     player.removeEventListener('error', onPlayerError);
+    player.removeEventListener('loadeddata', onPlayerMediaEvent);
+    player.removeEventListener('canplay', onPlayerMediaEvent);
+    player.removeEventListener('canplaythrough', onPlayerMediaEvent);
+    player.removeEventListener('waiting', onPlayerMediaEvent);
+    player.removeEventListener('stalled', onPlayerMediaEvent);
+    player.removeEventListener('suspend', onPlayerMediaEvent);
+    player.removeEventListener('abort', onPlayerMediaEvent);
+    player.removeEventListener('emptied', onPlayerMediaEvent);
+    player.removeEventListener('seeking', onPlayerMediaEvent);
+    player.removeEventListener('seeked', onPlayerMediaEvent);
     player.removeEventListener('play', onPlayerStateChange);
     player.removeEventListener('playing', onPlayerStateChange);
     player.removeEventListener('volumechange', onPlayerStateChange);
@@ -618,7 +664,109 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   function hasAuthenticatedSession() {
     return Boolean(getSessionToken());
   }
+  function installPlaybackDebugHook() {
+    window.__moontvWebOSDebug = function () {
+      const player = elements.player || document.querySelector('video');
+      return {
+        href: window.location.href,
+        userAgent: navigator.userAgent || '',
+        status: elements.statusPanel ? elements.statusPanel.textContent : '',
+        engineBadge: elements.playerEngineBadge ? elements.playerEngineBadge.textContent : '',
+        state: {
+          playerUrl: state.playerUrl,
+          resolving: state.isResolvingPlayback,
+          sameOrigin: state.isHostedOnSameOrigin,
+          detailTitle: state.detail && state.detail.title,
+          selectedEpisodeIndex: state.selectedEpisodeIndex,
+          compatibilityOffset: webOSCompatibilityPlaybackOffset
+        },
+        hls: {
+          type: typeof window.Hls,
+          supported: Boolean(window.Hls && window.Hls.isSupported && window.Hls.isSupported()),
+          unavailable: hlsJsUnavailable,
+          forcedSource: forcedHlsSource,
+          failedSource: failedHlsSource,
+          activeSource: activePlayerSource,
+          activeEngine: activePlayerEngine,
+          hasInstance: Boolean(activeHlsInstance),
+          lastError: lastHlsErrorDebug
+        },
+        playerError: lastPlayerErrorDebug,
+        fullscreen: {
+          body: document.body.dataset.remoteCastFullscreen || '',
+          shell: elements.playerShell ? elements.playerShell.dataset.remoteCastFullscreen || '' : ''
+        },
+        video: player ? {
+          src: player.currentSrc || player.src || '',
+          readyState: player.readyState,
+          networkState: player.networkState,
+          currentTime: player.currentTime,
+          duration: player.duration,
+          paused: player.paused,
+          playbackRate: player.playbackRate,
+          error: player.error ? {
+            code: player.error.code,
+            message: player.error.message
+          } : null
+        } : null,
+        rendered: elements.renderedPlayer ? {
+          active: renderedPlaybackActive,
+          src: elements.renderedPlayer.src || '',
+          source: renderedPlaybackSource,
+          paused: renderedPlaybackPaused,
+          currentTime: getRenderedPlaybackCurrentTime(),
+          duration: renderedPlaybackDuration,
+          playbackRate: renderedPlaybackRate,
+          complete: Boolean(elements.renderedPlayer.complete),
+          naturalWidth: elements.renderedPlayer.naturalWidth || 0,
+          naturalHeight: elements.renderedPlayer.naturalHeight || 0
+        } : null,
+        events: playbackDebugEvents.slice(-80)
+      };
+    };
+  }
+  function recordPlaybackDebugEvent(type, data) {
+    playbackDebugEvents.push({
+      at: Date.now(),
+      type: String(type || ''),
+      data: data || null
+    });
+    if (playbackDebugEvents.length > 120) {
+      playbackDebugEvents = playbackDebugEvents.slice(-80);
+    }
+  }
+  function compactHlsError(data) {
+    const response = data && data.response;
+    return {
+      type: data && data.type,
+      details: data && data.details,
+      fatal: Boolean(data && data.fatal),
+      reason: data && data.reason,
+      url: data && (data.url || data.frag && data.frag.url || data.context && data.context.url),
+      response: response ? {
+        code: response.code,
+        text: response.text,
+        url: response.url
+      } : null
+    };
+  }
+  function compactPlayerError() {
+    const player = elements.player;
+    return {
+      src: player ? player.currentSrc || player.src || '' : '',
+      readyState: player ? player.readyState : 0,
+      networkState: player ? player.networkState : 0,
+      error: player && player.error ? {
+        code: player.error.code,
+        message: player.error.message
+      } : null
+    };
+  }
   function setStatus(message, tone) {
+    recordPlaybackDebugEvent('status', {
+      message: String(message || ''),
+      tone: String(tone || '')
+    });
     elements.statusPanel.textContent = message;
     elements.statusPanel.className = 'status-panel';
     if (tone === 'good') {
@@ -807,6 +955,9 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   }
   function renderPlayer() {
     if (!state.playerUrl) {
+      if (!state.isResolvingPlayback) {
+        exitRemoteCastFullscreen();
+      }
       elements.playerSummary.textContent = state.isResolvingPlayback ? 'Resolving playback URL...' : 'Choose an episode to start playback.';
       elements.playerOverlayTitle.textContent = state.isResolvingPlayback ? 'Preparing stream...' : 'No episode selected';
       elements.playerEngineBadge.textContent = state.isResolvingPlayback ? 'Loading' : 'Idle';
@@ -830,10 +981,10 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     const title = state.detail && Array.isArray(state.detail.episodes_titles) && state.detail.episodes_titles[state.selectedEpisodeIndex] ? state.detail.episodes_titles[state.selectedEpisodeIndex] : 'Selected episode';
     elements.playerSummary.textContent = title;
     elements.playerOverlayTitle.textContent = title;
-    elements.playerEngineBadge.textContent = shouldUseHlsJs(state.playerUrl) ? 'HLS' : 'Native';
+    elements.playerEngineBadge.textContent = isRenderedPlaybackUrl(state.playerUrl) ? 'Rendered' : shouldUseHlsJs(state.playerUrl) ? 'HLS' : 'Native';
     hidePlayerHint();
     const subtitleTracksChanged = syncManagedSubtitleTracks();
-    const nextPlayerEngine = shouldUseHlsJs(state.playerUrl) ? 'hls' : 'native';
+    const nextPlayerEngine = isRenderedPlaybackUrl(state.playerUrl) ? 'rendered' : shouldUseHlsJs(state.playerUrl) ? 'hls' : 'native';
     if (activePlayerSource !== state.playerUrl || activePlayerEngine !== nextPlayerEngine) {
       resetSubtitleDefaults();
       attachPlayerSource(state.playerUrl).then(function () {
@@ -874,7 +1025,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     }
     const tracks = getPlayerTextTracks();
     if (!tracks.length) {
-      elements.subtitleSummary.textContent = elements.player.readyState < 1 ? 'Loading subtitle tracks...' : 'No subtitle tracks detected for this stream.';
+      elements.subtitleSummary.textContent = !isPlayerReadyForPlayback() ? 'Loading subtitle tracks...' : 'No subtitle tracks detected for this stream.';
       return;
     }
     const activeTrack = getActiveSubtitleTrack(tracks);
@@ -1024,9 +1175,171 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     }
     return normalized.indexOf('.m3u8') !== -1 || normalized.indexOf('/m3u8') !== -1;
   }
+  function isRenderedPlaybackUrl(url) {
+    return getUrlPath(url).indexOf('/api/webos-mjpeg/stream.mjpg') === 0;
+  }
+  function getUrlQueryValue(url, name) {
+    const raw = String(url || '');
+    const queryIndex = raw.indexOf('?');
+    if (queryIndex === -1) {
+      return '';
+    }
+    const query = raw.slice(queryIndex + 1).split('#')[0].split('&');
+    for (let index = 0; index < query.length; index += 1) {
+      const entry = query[index];
+      const separator = entry.indexOf('=');
+      const key = separator === -1 ? entry : entry.slice(0, separator);
+      if (decodeURIComponent(key.replace(/\+/g, ' ')) === name) {
+        const value = separator === -1 ? '' : entry.slice(separator + 1);
+        return decodeURIComponent(value.replace(/\+/g, ' '));
+      }
+    }
+    return '';
+  }
+  function getRenderedPlaybackCurrentTime() {
+    if (!renderedPlaybackActive) {
+      return 0;
+    }
+    const base = Number(renderedPlaybackStartOriginalTime || 0);
+    const safeBase = isFinite(base) && base > 0 ? base : 0;
+    if (renderedPlaybackPaused) {
+      return safeBase;
+    }
+    const rate = Number(renderedPlaybackRate || 1);
+    const elapsed = Math.max(0, (Date.now() - Number(renderedPlaybackStartedAt || Date.now())) / 1000);
+    const current = safeBase + elapsed * (isFinite(rate) && rate > 0 ? rate : 1);
+    const duration = Number(renderedPlaybackDuration || 0);
+    if (duration > 0 && isFinite(duration)) {
+      return Math.min(duration, current);
+    }
+    return current;
+  }
+  function setRenderedPlaybackTime(originalTime, reloadStream) {
+    let target = Number(originalTime || 0);
+    if (!isFinite(target) || target < 0) {
+      target = 0;
+    }
+    const duration = Number(renderedPlaybackDuration || 0);
+    if (duration > 0 && isFinite(duration)) {
+      target = Math.min(duration, target);
+    }
+    renderedPlaybackStartOriginalTime = target;
+    renderedPlaybackStartedAt = Date.now();
+    if (reloadStream && renderedPlaybackActive && renderedPlaybackSource) {
+      webOSCompatibilityPlaybackOffset = Math.floor(Math.min(target, 24 * 60 * 60));
+      const nextUrl = buildRenderedPlaybackUrlFromExisting(renderedPlaybackSource, target);
+      renderedPlaybackSource = nextUrl;
+      state.playerUrl = nextUrl;
+      activePlayerSource = nextUrl;
+      if (elements.renderedPlayer) {
+        elements.renderedPlayer.src = appendRenderedPlaybackCacheBust(nextUrl);
+      }
+    }
+  }
+  function setRenderedPlaybackPaused(paused) {
+    const nextPaused = Boolean(paused);
+    const current = getRenderedPlaybackCurrentTime();
+    renderedPlaybackStartOriginalTime = current;
+    renderedPlaybackStartedAt = Date.now();
+    renderedPlaybackPaused = nextPaused;
+    updateRenderedPlaybackTicker();
+  }
+  function setRenderedPlaybackRate(rate) {
+    const current = getRenderedPlaybackCurrentTime();
+    const numericRate = Number(rate || 1);
+    renderedPlaybackRate = isFinite(numericRate) && numericRate > 0 ? Math.max(0.5, Math.min(4, numericRate)) : 1;
+    renderedPlaybackStartOriginalTime = current;
+    renderedPlaybackStartedAt = Date.now();
+  }
+  function isRenderedPlaybackReady() {
+    return Boolean(renderedPlaybackActive && elements.renderedPlayer && elements.renderedPlayer.src);
+  }
+  function getPlayerPaused() {
+    if (renderedPlaybackActive) {
+      return renderedPlaybackPaused;
+    }
+    return elements.player ? elements.player.paused : true;
+  }
+  function getPlayerEnded() {
+    if (renderedPlaybackActive) {
+      const duration = Number(renderedPlaybackDuration || 0);
+      return duration > 0 && isFinite(duration) && getRenderedPlaybackCurrentTime() >= duration - 0.2;
+    }
+    return elements.player ? elements.player.ended : false;
+  }
+  function getPlayerPlaybackRate() {
+    if (renderedPlaybackActive) {
+      return renderedPlaybackRate;
+    }
+    return elements.player ? elements.player.playbackRate || 1 : 1;
+  }
+  function setPlayerPlaybackRate(rate) {
+    if (renderedPlaybackActive) {
+      setRenderedPlaybackRate(rate);
+      return;
+    }
+    if (!elements.player) {
+      return;
+    }
+    elements.player.playbackRate = rate || 1;
+  }
+  function playPlayer() {
+    if (renderedPlaybackActive) {
+      setRenderedPlaybackPaused(false);
+      updatePlayerOverlay();
+      updateRemoteDanmakuAnimationState();
+      return Promise.resolve();
+    }
+    return elements.player && elements.player.play ? elements.player.play() : Promise.resolve();
+  }
+  function pausePlayer() {
+    if (renderedPlaybackActive) {
+      setRenderedPlaybackPaused(true);
+      updatePlayerOverlay();
+      updateRemoteDanmakuAnimationState();
+      return;
+    }
+    if (elements.player) {
+      elements.player.pause();
+    }
+  }
+  function isPlayerReadyForPlayback() {
+    if (renderedPlaybackActive) {
+      return isRenderedPlaybackReady();
+    }
+    return Boolean(elements.player && elements.player.readyState >= 1);
+  }
+  function buildRenderedPlaybackUrlFromExisting(url, start) {
+    const sourceUrl = getUrlQueryValue(url, 'url');
+    const source = getUrlQueryValue(url, 'source') || 'directplay';
+    return buildWebOSRenderedPlaybackUrl(sourceUrl, source, start);
+  }
+  function buildWebOSRenderedPlaybackUrl(rawEpisodeUrl, source, start) {
+    return '/api/webos-mjpeg/stream.mjpg?url=' + encodeURIComponent(rawEpisodeUrl) + '&source=' + encodeURIComponent(source || 'directplay') + '&start=' + encodeURIComponent(String(resolveWebOSCompatibilityStartValue(start)));
+  }
+  function resolveWebOSCompatibilityStartValue(value) {
+    const start = Number(value || 0);
+    if (!isFinite(start) || start < 0) {
+      return 0;
+    }
+    return Math.floor(Math.min(start, 24 * 60 * 60));
+  }
+  function appendRenderedPlaybackCacheBust(url) {
+    return appendQueryParam(url, '_', String(Date.now()));
+  }
   function clearNativePlayerSource() {
+    removeNativeSourceElements(elements.player);
     elements.player.removeAttribute('src');
+    elements.player.autoplay = false;
     elements.player.load();
+  }
+  function removeNativeSourceElements(player) {
+    if (!player) {
+      return;
+    }
+    Array.from(player.querySelectorAll('source[data-native-source="true"]')).forEach(function (source) {
+      source.remove();
+    });
   }
   function recreatePlayerElement() {
     const oldPlayer = elements.player;
@@ -1040,6 +1353,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     nextPlayer.autoplay = oldPlayer.autoplay;
     nextPlayer.muted = wasMuted;
     nextPlayer.volume = volume;
+    nextPlayer.preload = oldPlayer.preload || 'auto';
     if (oldPlayer.getAttribute('playsinline') !== null) {
       nextPlayer.setAttribute('playsinline', '');
     }
@@ -1057,11 +1371,109 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     bindPlayerEvents(nextPlayer);
     return nextPlayer;
   }
+  function setRenderedPlaybackActive(active) {
+    renderedPlaybackActive = Boolean(active);
+    if (elements.playerShell) {
+      elements.playerShell.dataset.renderedPlayback = renderedPlaybackActive ? 'true' : 'false';
+    }
+    if (elements.renderedPlayer) {
+      elements.renderedPlayer.classList.toggle('hidden', !renderedPlaybackActive);
+    }
+  }
+  function resetRenderedPlaybackState() {
+    renderedPlaybackSource = '';
+    renderedPlaybackPaused = true;
+    renderedPlaybackRate = 1;
+    renderedPlaybackStartOriginalTime = 0;
+    renderedPlaybackStartedAt = 0;
+    renderedPlaybackDuration = 0;
+  }
+  function stopRenderedPlayback() {
+    window.clearInterval(renderedPlaybackTicker);
+    renderedPlaybackTicker = 0;
+    setRenderedPlaybackActive(false);
+    if (elements.renderedPlayer) {
+      elements.renderedPlayer.onload = null;
+      elements.renderedPlayer.onerror = null;
+      elements.renderedPlayer.removeAttribute('src');
+    }
+    resetRenderedPlaybackState();
+  }
+  function updateRenderedPlaybackTicker() {
+    window.clearInterval(renderedPlaybackTicker);
+    renderedPlaybackTicker = 0;
+    if (!renderedPlaybackActive || renderedPlaybackPaused) {
+      return;
+    }
+    renderedPlaybackTicker = window.setInterval(function () {
+      if (!renderedPlaybackActive || renderedPlaybackPaused) {
+        updateRenderedPlaybackTicker();
+        return;
+      }
+      onRenderedPlaybackTick();
+    }, 500);
+  }
+  function onRenderedPlaybackTick() {
+    clearNativeHlsFallbackTimer();
+    updateRemoteDanmakuOverlay();
+    if (suppressResumeSeekForCurrentLoad && getOriginalPlayerTime() > 1) {
+      suppressResumeSeekForCurrentLoad = false;
+    }
+    updatePlayerOverlay();
+    if (!state.detail) {
+      return;
+    }
+    window.clearTimeout(saveProgressTimer);
+    saveProgressTimer = window.setTimeout(function () {
+      const now = Date.now();
+      if (now - lastSavedProgressAt >= 10000) {
+        persistPlayRecord(false).catch(function () {
+          return null;
+        });
+      }
+    }, 400);
+  }
+  function attachRenderedSource(url, attachToken) {
+    if (attachToken !== playerAttachToken) {
+      return;
+    }
+    recordPlaybackDebugEvent('attach-rendered', {
+      url: url
+    });
+    clearNativeHlsFallbackTimer();
+    detachHlsInstance();
+    clearNativePlayerSource();
+    setRenderedPlaybackActive(true);
+    renderedPlaybackSource = url;
+    renderedPlaybackStartedAt = Date.now();
+    renderedPlaybackStartOriginalTime = getWebOSCompatibilityOffset();
+    renderedPlaybackDuration = pendingRemotePlaybackState && Number(pendingRemotePlaybackState.duration || 0) > 0 ? Number(pendingRemotePlaybackState.duration || 0) : 0;
+    renderedPlaybackRate = pendingRemotePlaybackState && Number(pendingRemotePlaybackState.playbackRate || 0) > 0 ? pendingRemotePlaybackState.playbackRate : 1;
+    renderedPlaybackPaused = pendingRemotePlaybackState ? pendingRemotePlaybackState.paused === true : !pendingAutoplay;
+    if (elements.renderedPlayer) {
+      elements.renderedPlayer.onload = function () {
+        recordPlaybackDebugEvent('rendered-frame-loaded', {
+          naturalWidth: elements.renderedPlayer.naturalWidth || 0,
+          naturalHeight: elements.renderedPlayer.naturalHeight || 0
+        });
+      };
+      elements.renderedPlayer.onerror = function () {
+        recordPlaybackDebugEvent('rendered-frame-error', {
+          src: elements.renderedPlayer.src || ''
+        });
+        setStatus('Rendered playback failed to load.', 'error');
+      };
+      elements.renderedPlayer.src = appendRenderedPlaybackCacheBust(url);
+    }
+    onPlayerLoadStart();
+    onPlayerLoadedMetadata();
+    updateRenderedPlaybackTicker();
+  }
   function shouldRecreateNativePlayerForSource(url) {
     return isWebOSBrowser() && !isHlsStreamUrl(url);
   }
   function shouldWaitForMetadataBeforeAutoplay() {
-    return isWebOSBrowser() && elements.player && elements.player.readyState < 1;
+    return false;
   }
   function clearNativeHlsFallbackTimer() {
     window.clearTimeout(nativeHlsFallbackTimer);
@@ -1085,6 +1497,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     activePlayerEngine = '';
     clearNativeHlsFallbackTimer();
     detachHlsInstance();
+    stopRenderedPlayback();
     clearNativePlayerSource();
   }
   function attachPlayerSource(_x) {
@@ -1092,10 +1505,15 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   }
   function _attachPlayerSource() {
     _attachPlayerSource = _asyncToGenerator(function* (url) {
-      const nextEngine = shouldUseHlsJs(url) ? 'hls' : 'native';
+      const nextEngine = isRenderedPlaybackUrl(url) ? 'rendered' : shouldUseHlsJs(url) ? 'hls' : 'native';
       const attachToken = ++playerAttachToken;
       activePlayerSource = url;
       activePlayerEngine = nextEngine;
+      if (nextEngine === 'rendered') {
+        attachRenderedSource(url, attachToken);
+        return;
+      }
+      stopRenderedPlayback();
       if (nextEngine === 'hls') {
         const attached = yield attachHlsSource(url, attachToken);
         if (attached) {
@@ -1114,16 +1532,63 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     if (attachToken !== playerAttachToken) {
       return;
     }
+    recordPlaybackDebugEvent('attach-native', {
+      url: url
+    });
     clearNativeHlsFallbackTimer();
     detachHlsInstance();
     if (shouldRecreateNativePlayerForSource(url)) {
       recreatePlayerElement();
     }
-    if (elements.player.src !== url) {
+    elements.player.preload = 'auto';
+    elements.player.autoplay = Boolean(pendingAutoplay || pendingRemotePlaybackState);
+    elements.player.setAttribute('playsinline', '');
+    elements.player.setAttribute('webkit-playsinline', '');
+    if (shouldUseNativeSourceElement(url)) {
+      attachNativeSourceElement(url);
+    } else if (elements.player.src !== url) {
+      removeNativeSourceElements(elements.player);
       elements.player.src = url;
       elements.player.load();
     }
     scheduleNativeHlsFallback(url, attachToken);
+  }
+  function shouldUseNativeSourceElement(url) {
+    return isWebOSBrowser() && !isHlsStreamUrl(url);
+  }
+  function attachNativeSourceElement(url) {
+    const existing = elements.player.querySelector('source[data-native-source="true"]');
+    if (existing && existing.src === url && !elements.player.src) {
+      return;
+    }
+    removeNativeSourceElements(elements.player);
+    elements.player.removeAttribute('src');
+    const source = document.createElement('source');
+    source.src = url;
+    source.type = getNativeSourceMimeType(url);
+    source.dataset.nativeSource = 'true';
+    if (elements.player.firstChild) {
+      elements.player.insertBefore(source, elements.player.firstChild);
+    } else {
+      elements.player.appendChild(source);
+    }
+    elements.player.load();
+  }
+  function getNativeSourceMimeType(url) {
+    const normalized = String(url || '').toLowerCase().split('?')[0];
+    if (/\.webm$/i.test(normalized)) {
+      return 'video/webm';
+    }
+    if (/\.m4v$/i.test(normalized)) {
+      return 'video/mp4';
+    }
+    if (/\.mov$/i.test(normalized)) {
+      return 'video/quicktime';
+    }
+    if (/\.mp4$/i.test(normalized)) {
+      return 'video/mp4';
+    }
+    return '';
   }
   function scheduleNativeHlsFallback(url, attachToken) {
     if (!canUseHlsJs(url) || forcedHlsSource === url || failedHlsSource === url) {
@@ -1144,6 +1609,9 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   function _attachHlsSource() {
     _attachHlsSource = _asyncToGenerator(function* (url, attachToken) {
       let Hls = null;
+      recordPlaybackDebugEvent('attach-hls-start', {
+        url: url
+      });
       clearNativeHlsFallbackTimer();
       detachHlsInstance();
       clearNativePlayerSource();
@@ -1151,6 +1619,10 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
         Hls = yield loadHlsLibrary();
       } catch (error) {
         hlsJsUnavailable = true;
+        recordPlaybackDebugEvent('attach-hls-load-failed', {
+          url: url,
+          message: error && error.message
+        });
         setStatus('HLS fallback failed to load. Trying native playback.', 'error');
         return false;
       }
@@ -1159,6 +1631,9 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       }
       if (!Hls || !Hls.isSupported || !Hls.isSupported()) {
         hlsJsUnavailable = true;
+        recordPlaybackDebugEvent('attach-hls-unsupported', {
+          url: url
+        });
         return false;
       }
       activeHlsInstance = new Hls({
@@ -1179,6 +1654,10 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       if (attachToken !== playerAttachToken || activeHlsInstance !== hls) {
         return;
       }
+      recordPlaybackDebugEvent('hls-source-failed', {
+        url: url,
+        message: message
+      });
       failedHlsSource = url;
       forcedHlsSource = '';
       pendingAutoplay = false;
@@ -1194,18 +1673,27 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       if (attachToken !== playerAttachToken || activeHlsInstance !== hls) {
         return;
       }
+      recordPlaybackDebugEvent('hls-media-attached', {
+        url: url
+      });
       hls.loadSource(url);
     });
-    hls.on(Hls.Events.MANIFEST_PARSED, function () {
+    hls.on(Hls.Events.MANIFEST_PARSED, function (_event, data) {
       if (attachToken !== playerAttachToken || activeHlsInstance !== hls) {
         return;
       }
+      recordPlaybackDebugEvent('hls-manifest-parsed', {
+        url: url,
+        levels: data && data.levels ? data.levels.length : 0
+      });
       scheduleSubtitleRefresh();
     });
     hls.on(Hls.Events.ERROR, function (_event, data) {
       if (!data || attachToken !== playerAttachToken || activeHlsInstance !== hls) {
         return;
       }
+      lastHlsErrorDebug = compactHlsError(data);
+      recordPlaybackDebugEvent('hls-error', lastHlsErrorDebug);
       if (data.details === 'bufferAppendError' || data.details === 'bufferAppendingError') {
         appendErrorCount += 1;
         if (appendErrorCount >= 3) {
@@ -1922,6 +2410,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       pendingAutoplay = Boolean(options && options.autoplay);
       forcedHlsSource = '';
       failedHlsSource = '';
+      webOSCompatibilityPlaybackOffset = 0;
       suppressResumeSeekForCurrentLoad = Boolean(options && options.resume === false);
       persistSelection();
       renderEpisodes();
@@ -1977,12 +2466,78 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
         return state.isHostedOnSameOrigin ? rawEpisodeUrl : state.serverUrl + rawEpisodeUrl;
       }
       const looksLikeM3u8 = /\.m3u($|\?)/i.test(rawEpisodeUrl) || rawEpisodeUrl.toLowerCase().indexOf('.m3u8') !== -1 || !/\.(mp4|webm|m4v|mov|avi|flv)(\?|$)/i.test(rawEpisodeUrl);
+      if (shouldUseServerHlsProxyForWebOS(looksLikeM3u8)) {
+        return buildWebOSCompatibilityHlsUrl(rawEpisodeUrl, detail, index);
+      }
       if (detail.proxyMode && looksLikeM3u8 && state.isHostedOnSameOrigin) {
         return '/api/proxy/vod/m3u8?url=' + encodeURIComponent(rawEpisodeUrl) + '&source=' + encodeURIComponent(detail.source);
       }
       return rawEpisodeUrl;
     });
     return _resolvePlaybackUrl.apply(this, arguments);
+  }
+  function shouldUseServerHlsProxyForWebOS(looksLikeM3u8) {
+    return Boolean(looksLikeM3u8 && state.isHostedOnSameOrigin && isWebOSBrowser());
+  }
+  function buildWebOSCompatibilityHlsUrl(rawEpisodeUrl, detail, index) {
+    webOSCompatibilityPlaybackOffset = resolveWebOSCompatibilityStartOffset(detail, index);
+    return buildWebOSRenderedPlaybackUrl(rawEpisodeUrl, detail && detail.source || 'directplay', webOSCompatibilityPlaybackOffset);
+  }
+  function resolveWebOSCompatibilityStartOffset(detail, index) {
+    let start = 0;
+    if (pendingRemotePlaybackState && Number(pendingRemotePlaybackState.currentTime || 0) > 1) {
+      start = Number(pendingRemotePlaybackState.currentTime || 0);
+    } else if (detail && !suppressResumeSeekForCurrentLoad) {
+      const key = buildStorageKey(detail.source, detail.id);
+      const record = state.history[key];
+      if (record && record.index === index + 1 && Number(record.play_time || 0) > 5) {
+        start = Number(record.play_time || 0);
+      }
+    }
+    if (!isFinite(start) || start < 0) {
+      return 0;
+    }
+    return Math.floor(Math.min(start, 24 * 60 * 60));
+  }
+  function getWebOSCompatibilityOffset() {
+    const offset = Number(webOSCompatibilityPlaybackOffset || 0);
+    return isFinite(offset) && offset > 0 ? offset : 0;
+  }
+  function getOriginalPlayerTime() {
+    if (renderedPlaybackActive) {
+      return getRenderedPlaybackCurrentTime();
+    }
+    const current = Number(elements.player && elements.player.currentTime || 0);
+    return Math.max(0, (isFinite(current) ? current : 0) + getWebOSCompatibilityOffset());
+  }
+  function getOriginalPlayerDuration() {
+    if (renderedPlaybackActive) {
+      const duration = Number(renderedPlaybackDuration || 0);
+      return duration > 0 && isFinite(duration) ? duration : 0;
+    }
+    const duration = Number(elements.player && elements.player.duration || 0);
+    if (!duration || !isFinite(duration)) {
+      return duration || 0;
+    }
+    return duration + getWebOSCompatibilityOffset();
+  }
+  function seekPlayerToOriginalTime(originalTime) {
+    const target = Number(originalTime || 0);
+    if (!isFinite(target) || target < 0) {
+      if (renderedPlaybackActive) {
+        setRenderedPlaybackTime(0, true);
+        return;
+      }
+      elements.player.currentTime = 0;
+      return;
+    }
+    if (renderedPlaybackActive) {
+      setRenderedPlaybackTime(target, true);
+      return;
+    }
+    const adjusted = Math.max(0, target - getWebOSCompatibilityOffset());
+    const duration = Number(elements.player.duration || 0);
+    elements.player.currentTime = duration > 0 && isFinite(duration) ? Math.max(0, Math.min(duration, adjusted)) : adjusted;
   }
   function isLazyPlaybackUrl(url) {
     const path = getUrlPath(url);
@@ -2094,8 +2649,8 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
         return;
       }
       yield selectEpisode(Math.max(0, (record.index || 1) - 1), false);
-      if (elements.player.paused) {
-        elements.player.play().catch(function () {
+      if (getPlayerPaused()) {
+        playPlayer().catch(function () {
           return null;
         });
       }
@@ -2109,33 +2664,63 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       maybeRunPendingAutoplay();
       return;
     }
-    if (!suppressResumeSeekForCurrentLoad) {
+    if (pendingRemotePlaybackState) {
+      applyPendingRemotePlaybackState();
+    } else if (!suppressResumeSeekForCurrentLoad) {
       const key = buildStorageKey(state.detail.source, state.detail.id);
       const record = state.history[key];
       if (record && record.index === state.selectedEpisodeIndex + 1 && Number(record.play_time) > 5 && Number(record.total_time || 0) > Number(record.play_time)) {
-        elements.player.currentTime = Number(record.play_time);
+        seekPlayerToOriginalTime(Number(record.play_time));
       }
     }
     scheduleSubtitleRefresh();
     maybeRunPendingAutoplay();
   }
   function maybeRunPendingAutoplay() {
-    if (!pendingAutoplay || !state.playerUrl || elements.player.readyState < 1) {
+    if (!pendingAutoplay || !state.playerUrl || !isPlayerReadyForPlayback()) {
       return;
     }
     pendingAutoplay = false;
     playPlayerSoon();
   }
   function onPlayerLoadStart() {
+    recordPlaybackDebugEvent('media-loadstart', compactPlayerState());
     resetSubtitleDefaults();
     renderSubtitleTracks();
+    remoteDanmakuSpawned = {};
+    remoteDanmakuLastTime = 0;
+    clearRemoteDanmakuLayer();
+  }
+  function onPlayerMediaEvent(event) {
+    recordPlaybackDebugEvent('media-' + (event && event.type || 'event'), compactPlayerState());
+    if (pendingRemotePlaybackState && elements.player && isPlayerReadyForPlayback()) {
+      applyPendingRemotePlaybackState();
+    }
+  }
+  function compactPlayerState() {
+    const player = elements.player;
+    return player ? {
+      src: player.currentSrc || player.src || '',
+      readyState: player.readyState,
+      networkState: player.networkState,
+      currentTime: player.currentTime,
+      duration: player.duration,
+      paused: player.paused,
+      playbackRate: player.playbackRate,
+      error: player.error ? {
+        code: player.error.code,
+        message: player.error.message
+      } : null
+    } : null;
   }
   function onPlayerTimeUpdate() {
     clearNativeHlsFallbackTimer();
-    if (suppressResumeSeekForCurrentLoad && Number(elements.player.currentTime || 0) > 1) {
+    updateRemoteDanmakuOverlay();
+    if (suppressResumeSeekForCurrentLoad && getOriginalPlayerTime() > 1) {
       suppressResumeSeekForCurrentLoad = false;
     }
-    if (!state.detail || !elements.player.duration || !isFinite(elements.player.duration)) {
+    const duration = getOriginalPlayerDuration();
+    if (!state.detail || !duration || !isFinite(duration)) {
       return;
     }
     window.clearTimeout(saveProgressTimer);
@@ -2154,13 +2739,16 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     });
   }
   function onPlayerPause() {
-    if (elements.player.currentTime > 0 && !elements.player.ended) {
+    updateRemoteDanmakuAnimationState();
+    if (getOriginalPlayerTime() > 0 && !getPlayerEnded()) {
       persistPlayRecord(false).catch(function () {
         return null;
       });
     }
   }
   function onPlayerError() {
+    lastPlayerErrorDebug = compactPlayerError();
+    recordPlaybackDebugEvent('player-error', lastPlayerErrorDebug);
     updatePlayerOverlay();
     triggerHlsFallbackFromNative('Native HLS failed. Trying HLS fallback.');
   }
@@ -2168,9 +2756,14 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     if (!state.playerUrl || activePlayerEngine !== 'native' || !canUseHlsJs(state.playerUrl) || forcedHlsSource === state.playerUrl || failedHlsSource === state.playerUrl || hlsJsUnavailable) {
       return;
     }
-    const shouldResume = !elements.player.paused || pendingAutoplay;
+    const shouldResume = !getPlayerPaused() || pendingAutoplay;
     forcedHlsSource = state.playerUrl;
     elements.playerEngineBadge.textContent = 'HLS';
+    recordPlaybackDebugEvent('native-hls-fallback', {
+      url: state.playerUrl,
+      message: message,
+      shouldResume: shouldResume
+    });
     setStatus(message, 'error');
     attachPlayerSource(state.playerUrl).then(function () {
       if (shouldResume) {
@@ -2196,8 +2789,8 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
         year: state.detail.year || '',
         index: state.selectedEpisodeIndex + 1,
         total_episodes: Array.isArray(state.detail.episodes_titles) ? state.detail.episodes_titles.length : 0,
-        play_time: completed ? Number(elements.player.duration || 0) : Number(elements.player.currentTime || 0),
-        total_time: Number(elements.player.duration || 0),
+        play_time: completed ? getOriginalPlayerDuration() : getOriginalPlayerTime(),
+        total_time: getOriginalPlayerDuration(),
         save_time: Date.now(),
         search_title: resolveSelectedSearchTitle()
       };
@@ -2488,6 +3081,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       tvRemoteSocket.on('tv-remote:key', dispatchSyntheticKey);
       tvRemoteSocket.on('tv-remote:text', applyRemoteText);
       tvRemoteSocket.on('tv-remote:play', handleRemotePlayCommand);
+      tvRemoteSocket.on('tv-remote:sync', handleRemoteSyncCommand);
       window.clearInterval(tvRemoteStateTimer);
       tvRemoteStateTimer = window.setInterval(updateTVRemoteState, 10000);
       document.addEventListener('visibilitychange', updateTVRemoteState);
@@ -2565,6 +3159,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   function _handleRemotePlayCommand() {
     _handleRemotePlayCommand = _asyncToGenerator(function* (command) {
       try {
+        enterRemoteCastFullscreen();
         if (shouldReloadForRemotePlay(command || {})) {
           scheduleRemotePlayReload(command || {});
           return;
@@ -2578,6 +3173,199 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       }
     });
     return _handleRemotePlayCommand.apply(this, arguments);
+  }
+  function handleRemoteSyncCommand(_x26) {
+    return _handleRemoteSyncCommand.apply(this, arguments);
+  }
+  function _handleRemoteSyncCommand() {
+    _handleRemoteSyncCommand = _asyncToGenerator(function* (command) {
+      try {
+        command = command || {};
+        enterRemoteCastFullscreen();
+        if (!state.detail || isDifferentRemoteVideo(command)) {
+          yield handleRemotePlayCommand(command);
+          return;
+        }
+        applyRemoteDanmakuPayload(command);
+        const requestedIndex = Number(command.index);
+        if (isFinite(requestedIndex) && Math.floor(requestedIndex) !== state.selectedEpisodeIndex && Array.isArray(state.detail.episodes)) {
+          pendingRemotePlaybackState = normalizeRemotePlaybackState(command);
+          yield selectEpisode(Math.floor(requestedIndex), false, {
+            autoplay: pendingRemotePlaybackState.paused !== true,
+            resume: false
+          });
+        } else {
+          applyRemotePlaybackState(command);
+        }
+        setStatus('TV playback synced.', 'good');
+      } catch (error) {
+        setStatus(error.message || 'Failed to sync TV playback.', 'error');
+      }
+    });
+    return _handleRemoteSyncCommand.apply(this, arguments);
+  }
+  function isDifferentRemoteVideo(command) {
+    const commandSource = String(command && command.source || '').trim();
+    const commandId = String(command && command.id || '').trim();
+    if (!commandSource && !commandId) {
+      return false;
+    }
+    return commandSource && commandSource !== String(state.detail && state.detail.source || '') || commandId && commandId !== String(state.detail && state.detail.id || '');
+  }
+  function normalizeRemotePlaybackState(command) {
+    const playback = command && command.playback ? command.playback : command || {};
+    const currentTime = Number(playback.currentTime || 0);
+    const duration = Number(playback.duration || 0);
+    const playbackRate = Number(playback.playbackRate || 1);
+    return {
+      currentTime: isFinite(currentTime) && currentTime >= 0 ? currentTime : 0,
+      duration: isFinite(duration) && duration >= 0 ? duration : 0,
+      playbackRate: isFinite(playbackRate) && playbackRate > 0 ? Math.max(0.5, Math.min(4, playbackRate)) : 1,
+      paused: playback.paused === true,
+      updatedAt: Number(playback.updatedAt || Date.now())
+    };
+  }
+  function applyRemotePlaybackState(command) {
+    const playback = normalizeRemotePlaybackState(command);
+    pendingRemotePlaybackState = playback;
+    enterRemoteCastFullscreen();
+    applyPendingRemotePlaybackState();
+  }
+  function applyPendingRemotePlaybackState() {
+    if (!pendingRemotePlaybackState || !elements.player) {
+      return false;
+    }
+    const playback = pendingRemotePlaybackState;
+    try {
+      setPlayerPlaybackRate(playback.playbackRate || 1);
+    } catch (error) {}
+    if (renderedPlaybackActive && playback.duration > 0) {
+      renderedPlaybackDuration = playback.duration;
+    }
+    if (playback.paused) {
+      pausePlayer();
+    } else {
+      enterRemoteCastFullscreen();
+      playPlayer().catch(function () {
+        setPlayerHint('Press OK', 1200);
+      });
+    }
+    if (!isPlayerReadyForPlayback()) {
+      return false;
+    }
+    const currentTime = getOriginalPlayerTime();
+    if (playback.currentTime > 0 && Math.abs(currentTime - playback.currentTime) > 1.2) {
+      try {
+        seekPlayerToOriginalTime(playback.currentTime);
+      } catch (error) {
+        return false;
+      }
+    }
+    pendingRemotePlaybackState = null;
+    updatePlayerOverlay();
+    return true;
+  }
+  function normalizeRemoteDanmakuItems(items) {
+    if (!Array.isArray(items)) {
+      return [];
+    }
+    return items.map(function (item) {
+      return {
+        text: String(item && item.text || '').slice(0, 240),
+        time: Number(item && item.time || 0),
+        color: String(item && item.color || '#ffffff'),
+        mode: Number(item && item.mode || 0)
+      };
+    }).filter(function (item) {
+      return item.text && isFinite(item.time) && item.time >= 0;
+    }).slice(0, 3000);
+  }
+  function applyRemoteDanmakuPayload(command) {
+    const danmaku = command && command.danmaku;
+    if (!danmaku) {
+      return;
+    }
+    remoteDanmakuEnabled = danmaku.enabled !== false;
+    if (danmaku.settings) {
+      const fontSize = Number(danmaku.settings.fontSize || remoteDanmakuSettings.fontSize);
+      const opacity = Number(danmaku.settings.opacity || remoteDanmakuSettings.opacity);
+      remoteDanmakuSettings = {
+        fontSize: isFinite(fontSize) ? Math.max(20, Math.min(46, fontSize)) : remoteDanmakuSettings.fontSize,
+        opacity: isFinite(opacity) ? Math.max(0.25, Math.min(1, opacity)) : remoteDanmakuSettings.opacity
+      };
+    }
+    const comments = normalizeRemoteDanmakuItems(danmaku.comments);
+    if (comments.length > 0) {
+      remoteDanmakuItems = comments;
+      remoteDanmakuSpawned = {};
+      remoteDanmakuLastTime = Math.max(0, getOriginalPlayerTime() - 9);
+      clearRemoteDanmakuLayer();
+    } else if (!remoteDanmakuEnabled) {
+      clearRemoteDanmakuLayer();
+    }
+  }
+  function clearRemoteDanmakuLayer() {
+    if (elements.playerDanmakuLayer) {
+      elements.playerDanmakuLayer.innerHTML = '';
+    }
+  }
+  function updateRemoteDanmakuAnimationState() {
+    if (!elements.playerDanmakuLayer) {
+      return;
+    }
+    const stateValue = getPlayerPaused() ? 'paused' : 'running';
+    Array.from(elements.playerDanmakuLayer.children).forEach(function (node) {
+      if (node && node.style) {
+        node.style.animationPlayState = stateValue;
+      }
+    });
+  }
+  function getRemoteDanmakuDuration(text) {
+    return Math.max(6, 12 - Math.min(6, String(text || '').length / 6));
+  }
+  function updateRemoteDanmakuOverlay() {
+    if (!remoteDanmakuEnabled || !remoteDanmakuItems.length || !elements.playerDanmakuLayer) {
+      return;
+    }
+    const current = getOriginalPlayerTime();
+    const previous = remoteDanmakuLastTime;
+    const jumped = current < previous - 1 || current - previous > 2;
+    const spawnWindow = jumped ? 8 : Math.max(0.6, current - previous + 0.2);
+    const laneCount = 8;
+    if (jumped) {
+      remoteDanmakuSpawned = {};
+      clearRemoteDanmakuLayer();
+    }
+    remoteDanmakuItems.map(function (item, index) {
+      return {
+        id: String(index) + '-' + String(item.time) + '-' + item.text,
+        text: item.text,
+        time: item.time,
+        color: item.color,
+        lane: index % laneCount
+      };
+    }).filter(function (item) {
+      const delta = jumped ? Math.abs(item.time - current) : current - item.time;
+      return delta >= 0 && delta <= spawnWindow && !remoteDanmakuSpawned[item.id];
+    }).slice(0, laneCount).forEach(function (item) {
+      const node = document.createElement('div');
+      node.className = 'player-danmaku-item';
+      node.textContent = item.text;
+      node.style.top = String(item.lane * 12) + '%';
+      node.style.color = item.color || '#ffffff';
+      node.style.fontSize = String(remoteDanmakuSettings.fontSize) + 'px';
+      node.style.opacity = String(remoteDanmakuSettings.opacity);
+      node.style.animation = 'webos-danmaku ' + String(getRemoteDanmakuDuration(item.text)) + 's linear forwards';
+      node.style.animationPlayState = getPlayerPaused() ? 'paused' : 'running';
+      node.addEventListener('animationend', function () {
+        if (node.parentNode) {
+          node.parentNode.removeChild(node);
+        }
+      });
+      remoteDanmakuSpawned[item.id] = true;
+      elements.playerDanmakuLayer.appendChild(node);
+    });
+    remoteDanmakuLastTime = current;
   }
   function shouldReloadForRemotePlay(command) {
     if (!isWebOSBrowser() || !state.isHostedOnSameOrigin || !command || command.__reloaded) {
@@ -2693,7 +3481,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     }
     return directUrl;
   }
-  function openDirectPlayCommand(_x26) {
+  function openDirectPlayCommand(_x27) {
     return _openDirectPlayCommand.apply(this, arguments);
   }
   function _openDirectPlayCommand() {
@@ -2746,8 +3534,11 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       renderResults();
       renderDetail();
       renderEpisodes();
+      applyRemoteDanmakuPayload(command);
+      pendingRemotePlaybackState = normalizeRemotePlaybackState(command);
+      enterRemoteCastFullscreen();
       yield selectEpisode(0, false, {
-        autoplay: true,
+        autoplay: pendingRemotePlaybackState.paused !== true,
         resume: false
       });
       setStatus('Casting ' + state.detail.title + ' to TV.', 'good');
@@ -2758,7 +3549,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     });
     return _openDirectPlayCommand.apply(this, arguments);
   }
-  function openRemotePlayCommand(_x27) {
+  function openRemotePlayCommand(_x28) {
     return _openRemotePlayCommand.apply(this, arguments);
   }
   function _openRemotePlayCommand() {
@@ -2777,6 +3568,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       let detail = null;
       let searchTitle = String(command.searchTitle || title).trim();
       setStatus('Receiving cast request...', 'info');
+      enterRemoteCastFullscreen();
       revealPlayerControls();
       setPlayerHint('Casting', 1200);
       if (source && id) {
@@ -2825,8 +3617,11 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       renderResults();
       renderDetail();
       renderEpisodes();
+      applyRemoteDanmakuPayload(command);
+      pendingRemotePlaybackState = normalizeRemotePlaybackState(command);
+      enterRemoteCastFullscreen();
       yield selectEpisode(safeIndex, false, {
-        autoplay: true,
+        autoplay: pendingRemotePlaybackState.paused !== true,
         resume: false
       });
       setStatus('Casting ' + (state.detail.title || state.selectedResult.title || 'video') + ' to TV.', 'good');
@@ -2837,21 +3632,22 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     return _openRemotePlayCommand.apply(this, arguments);
   }
   function updatePlayerOverlay() {
-    const duration = Number(elements.player.duration || 0);
-    const current = Number(elements.player.currentTime || 0);
+    const duration = getOriginalPlayerDuration();
+    const current = getOriginalPlayerTime();
     const hasDuration = duration > 0 && isFinite(duration);
     const percent = hasDuration ? Math.max(0, Math.min(100, current / duration * 100)) : 0;
     elements.playerProgressFill.style.width = percent + '%';
     elements.playerCurrentTime.textContent = formatTime(current);
     elements.playerDuration.textContent = hasDuration ? formatTime(duration) : '0:00';
-    elements.playerPlayButton.textContent = elements.player.paused ? 'Play' : 'Pause';
+    elements.playerPlayButton.textContent = getPlayerPaused() ? 'Play' : 'Pause';
     if (elements.playerShell) {
-      elements.playerShell.dataset.playerMode = state.isResolvingPlayback ? 'loading' : state.playerUrl ? elements.player.paused ? 'paused' : 'playing' : 'idle';
+      elements.playerShell.dataset.playerMode = state.isResolvingPlayback ? 'loading' : state.playerUrl ? getPlayerPaused() ? 'paused' : 'playing' : 'idle';
     }
   }
   function onPlayerStateChange() {
     updatePlayerOverlay();
-    if (!elements.player.paused && state.playerUrl) {
+    updateRemoteDanmakuAnimationState();
+    if (!getPlayerPaused() && state.playerUrl) {
       revealPlayerControls();
     }
   }
@@ -2861,10 +3657,70 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       elements.playerShell.dataset.controlsOpen = playerControlsOpen ? 'true' : 'false';
     }
   }
+  function setRemoteCastFullscreenActive(active) {
+    remoteCastFullscreenActive = Boolean(active);
+    document.body.dataset.remoteCastFullscreen = remoteCastFullscreenActive ? 'true' : 'false';
+    if (elements.playerShell) {
+      elements.playerShell.dataset.remoteCastFullscreen = remoteCastFullscreenActive ? 'true' : 'false';
+    }
+  }
+  function enterRemoteCastFullscreen() {
+    setRemoteCastFullscreenActive(true);
+    setPlayerControlsOpen(true);
+    if (elements.playerPanel && typeof elements.playerPanel.scrollIntoView === 'function') {
+      elements.playerPanel.scrollIntoView({
+        block: 'center'
+      });
+    }
+    if (elements.player && typeof elements.player.focus === 'function') {
+      elements.player.focus();
+    }
+    requestNativePlayerFullscreenSoon();
+    window.clearTimeout(playerIdleTimer);
+    playerIdleTimer = window.setTimeout(function () {
+      if (remoteCastFullscreenActive && state.playerUrl && !getPlayerPaused()) {
+        setPlayerControlsOpen(false);
+      }
+    }, 3500);
+  }
+  function exitRemoteCastFullscreen() {
+    if (!remoteCastFullscreenActive) {
+      return;
+    }
+    setRemoteCastFullscreenActive(false);
+    setPlayerControlsOpen(true);
+    window.clearTimeout(nativeFullscreenRequestTimer);
+    nativeFullscreenRequestTimer = 0;
+    const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
+    if (fullscreenElement) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+      if (exit) {
+        Promise.resolve(exit.call(document)).catch(function () {});
+      }
+    }
+  }
+  function requestNativePlayerFullscreenSoon() {
+    window.clearTimeout(nativeFullscreenRequestTimer);
+    nativeFullscreenRequestTimer = window.setTimeout(function () {
+      const target = elements.playerShell || elements.player;
+      if (!target) {
+        return;
+      }
+      const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
+      if (fullscreenElement) {
+        return;
+      }
+      const request = target.requestFullscreen || target.webkitRequestFullscreen || target.webkitRequestFullScreen || target.mozRequestFullScreen || target.msRequestFullscreen;
+      if (!request) {
+        return;
+      }
+      Promise.resolve(request.call(target)).catch(function () {});
+    }, 120);
+  }
   function revealPlayerControls() {
     setPlayerControlsOpen(true);
     window.clearTimeout(playerIdleTimer);
-    if (state.playerUrl && !elements.player.paused) {
+    if (state.playerUrl && !getPlayerPaused()) {
       playerIdleTimer = window.setTimeout(function () {
         setPlayerControlsOpen(false);
       }, 10000);
@@ -2902,7 +3758,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       if (!state.playerUrl) {
         return;
       }
-      elements.player.play().catch(function () {
+      playPlayer().catch(function () {
         setPlayerHint('Press OK', 1200);
       });
     }, 80);
@@ -2913,22 +3769,22 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       setPlayerHint(state.isResolvingPlayback ? 'Loading' : 'No stream', 1200);
       return;
     }
-    if (elements.player.paused) {
-      elements.player.play().catch(function () {
+    if (getPlayerPaused()) {
+      playPlayer().catch(function () {
         setPlayerHint('Press OK', 1200);
       });
     } else {
-      elements.player.pause();
+      pausePlayer();
     }
     updatePlayerOverlay();
   }
   function seekPlayerBy(delta, announce) {
-    const duration = Number(elements.player.duration || 0);
+    const duration = getOriginalPlayerDuration();
     if (!state.playerUrl || !duration || !isFinite(duration)) {
       return;
     }
-    const nextTime = Math.max(0, Math.min(duration, Number(elements.player.currentTime || 0) + delta));
-    elements.player.currentTime = nextTime;
+    const nextTime = Math.max(0, Math.min(duration, getOriginalPlayerTime() + delta));
+    seekPlayerToOriginalTime(nextTime);
     updatePlayerOverlay();
     revealPlayerControls();
     if (announce) {
@@ -3130,6 +3986,15 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       return;
     }
     if (key === 'Escape' || code === 461) {
+      if (remoteCastFullscreenActive) {
+        if (!playerControlsOpen) {
+          revealPlayerControls();
+        } else {
+          exitRemoteCastFullscreen();
+        }
+        event.preventDefault();
+        return;
+      }
       if (isPlayerControlActive() || !playerControlsOpen) {
         if (!playerControlsOpen) {
           revealPlayerControls();

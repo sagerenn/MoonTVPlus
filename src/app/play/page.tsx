@@ -2,7 +2,7 @@
 
 'use client';
 
-import { AlertCircle, Cloud, Heart, Loader2, Router, Sparkles, X } from 'lucide-react';
+import { AlertCircle, Cast, Cloud, Heart, Loader2, Router, Sparkles, X } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -31,6 +31,12 @@ import {
   saveManualDanmakuSelection,
 } from '@/lib/danmaku/selection-memory';
 import type { DanmakuAnime, DanmakuComment, DanmakuSelection, DanmakuSettings } from '@/lib/danmaku/types';
+import type {
+  TVRemoteDanmakuItem,
+  TVRemoteDevice,
+  TVRemotePlayCommand,
+  TVRemoteSyncCommand,
+} from '@/lib/tv-remote-types';
 import {
   deleteFavorite,
   deleteSkipConfig,
@@ -1798,6 +1804,214 @@ function PlayPageClient() {
     videoUrl: videoUrl || '',
     playerReady: playerReady,  // 传递播放器就绪状态
   });
+
+  const [tvCastDevices, setTVCastDevices] = useState<TVRemoteDevice[]>([]);
+  const [selectedTVDeviceId, setSelectedTVDeviceId] = useState('');
+  const [activeTVDeviceId, setActiveTVDeviceId] = useState('');
+  const [tvCastSending, setTVCastSending] = useState(false);
+  const [tvCastStatus, setTVCastStatus] = useState('');
+
+  const normalizeTVDanmakuItems = (items: any[]): TVRemoteDanmakuItem[] => {
+    if (!Array.isArray(items)) return [];
+
+    return items
+      .map((item) => ({
+        text: String(item?.text || '').slice(0, 240),
+        time: Number(item?.time || 0),
+        color: String(item?.color || '#ffffff'),
+        mode: Number(item?.mode || 0),
+      }))
+      .filter((item) => item.text && Number.isFinite(item.time) && item.time >= 0)
+      .slice(0, 3000);
+  };
+
+  const buildTVRemoteDanmakuPayload = (): TVRemotePlayCommand['danmaku'] => {
+    const settings = danmakuSettingsRef.current;
+    const pluginItems = danmakuPluginRef.current?.option?.danmuku || [];
+
+    return {
+      enabled: danmakuDisplayStateRef.current !== false,
+      selection: currentDanmakuSelection
+        ? {
+            animeId: currentDanmakuSelection.animeId,
+            episodeId: currentDanmakuSelection.episodeId,
+            animeTitle: currentDanmakuSelection.animeTitle,
+            episodeTitle: currentDanmakuSelection.episodeTitle,
+            searchKeyword: currentDanmakuSelection.searchKeyword,
+          }
+        : undefined,
+      settings: {
+        opacity: settings.opacity,
+        fontSize: settings.fontSize,
+        speed: settings.speed,
+        marginTop: settings.marginTop,
+        marginBottom: settings.marginBottom,
+        synchronousPlayback: settings.synchronousPlayback,
+      },
+      comments: normalizeTVDanmakuItems(pluginItems),
+    };
+  };
+
+  const buildTVRemotePlaybackState = (): TVRemotePlayCommand['playback'] => {
+    const player = artPlayerRef.current;
+    const video = player?.video as HTMLVideoElement | undefined;
+    const currentTime = Number(video?.currentTime ?? player?.currentTime ?? 0);
+    const duration = Number(video?.duration ?? player?.duration ?? 0);
+    const rate = Number(
+      video?.playbackRate ?? player?.playbackRate ?? lastPlaybackRateRef.current ?? 1
+    );
+
+    return {
+      currentTime: Number.isFinite(currentTime) && currentTime >= 0 ? currentTime : 0,
+      duration: Number.isFinite(duration) && duration >= 0 ? duration : 0,
+      playbackRate: Number.isFinite(rate) && rate > 0 ? rate : 1,
+      paused:
+        typeof video?.paused === 'boolean'
+          ? video.paused
+          : player
+            ? Boolean(player.paused)
+            : false,
+      updatedAt: Date.now(),
+    };
+  };
+
+  const buildTVRemotePlayCommand = (): TVRemotePlayCommand | null => {
+    const currentDetail = detailRef.current;
+    const title = (
+      videoTitleRef.current ||
+      currentDetail?.title ||
+      searchTitle ||
+      '正在播放'
+    ).trim();
+
+    if (!title && !currentIdRef.current) {
+      return null;
+    }
+
+    const command: TVRemotePlayCommand = {
+      title,
+      searchTitle: searchTitle || title,
+      index: currentEpisodeIndexRef.current,
+      playback: buildTVRemotePlaybackState(),
+      danmaku: buildTVRemoteDanmakuPayload(),
+    };
+
+    if (currentSourceRef.current && currentIdRef.current) {
+      command.source = currentSourceRef.current;
+      command.id = currentIdRef.current;
+    }
+
+    if (fileName) {
+      command.fileName = fileName;
+    }
+
+    return command;
+  };
+
+  const loadTVRemoteDevices = async () => {
+    const response = await fetch('/api/tv-remote/devices', {
+      cache: 'no-store',
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || '无法获取电视端列表');
+    }
+
+    const devices: TVRemoteDevice[] = Array.isArray(data.devices)
+      ? data.devices
+      : [];
+    setTVCastDevices(devices);
+    setSelectedTVDeviceId((current) => {
+      if (devices.some((device) => device.deviceId === current)) return current;
+      if (devices.some((device) => device.deviceId === activeTVDeviceId)) {
+        return activeTVDeviceId;
+      }
+      return devices[0]?.deviceId || '';
+    });
+    return devices;
+  };
+
+  const handleCastOrSyncToTV = async () => {
+    if (tvCastSending) return;
+
+    const playCommand = buildTVRemotePlayCommand();
+    if (!playCommand) {
+      setTVCastStatus('当前视频暂不支持投到电视');
+      return;
+    }
+
+    setTVCastSending(true);
+    setTVCastStatus('');
+    try {
+      const devices = await loadTVRemoteDevices();
+      const deviceId =
+        (selectedTVDeviceId &&
+          devices.some((device) => device.deviceId === selectedTVDeviceId) &&
+          selectedTVDeviceId) ||
+        (activeTVDeviceId &&
+          devices.some((device) => device.deviceId === activeTVDeviceId) &&
+          activeTVDeviceId) ||
+        devices[0]?.deviceId ||
+        '';
+
+      if (!deviceId) {
+        throw new Error('没有在线电视端');
+      }
+
+      const shouldSync = activeTVDeviceId === deviceId;
+      const syncCommand: TVRemoteSyncCommand = {
+        source: playCommand.source,
+        id: playCommand.id,
+        index: playCommand.index,
+        title: playCommand.title,
+        danmaku: playCommand.danmaku,
+        ...playCommand.playback,
+      };
+      const response = await fetch(
+        shouldSync ? '/api/tv-remote/sync' : '/api/tv-remote/play',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deviceId,
+            command: shouldSync ? syncCommand : playCommand,
+          }),
+        }
+      );
+      const data = await response.json().catch(() => ({
+        success: false,
+        error: '发送失败',
+      }));
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || '发送失败');
+      }
+
+      setActiveTVDeviceId(deviceId);
+      setSelectedTVDeviceId(deviceId);
+      const device = devices.find((item) => item.deviceId === deviceId);
+      const targetName = device?.deviceName || '电视端';
+      const message = shouldSync
+        ? `已同步到 ${targetName}`
+        : `已投到 ${targetName}`;
+      setTVCastStatus(message);
+      setToast({
+        message,
+        type: 'success',
+        onClose: () => setToast(null),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '投屏失败';
+      setTVCastStatus(message);
+      setToast({
+        message,
+        type: 'error',
+        onClose: () => setToast(null),
+      });
+    } finally {
+      setTVCastSending(false);
+    }
+  };
 
   // -----------------------------------------------------------------------------
   // 工具函数（Utils）
@@ -9200,6 +9414,37 @@ function PlayPageClient() {
                   <div className='bg-white/50 dark:bg-gray-800/50 backdrop-blur-sm rounded-lg p-2 border border-gray-200/50 dark:border-gray-700/50 w-full lg:w-auto overflow-x-auto'>
                     <div className='flex gap-1.5 flex-nowrap lg:flex-wrap items-center'>
                       <div className='flex gap-1.5 flex-nowrap lg:flex-wrap lg:justify-end lg:flex-1'>
+                        {/* 投到电视 / 同步电视 */}
+                        <button
+                          onClick={(e) => {
+                            e.preventDefault();
+                            void handleCastOrSyncToTV();
+                          }}
+                          disabled={tvCastSending}
+                          className={`group relative flex items-center justify-center gap-1 w-8 h-8 lg:w-auto lg:h-auto lg:px-2 lg:py-1.5 text-xs font-medium rounded-md transition-all duration-200 shadow-sm hover:shadow-md overflow-hidden border flex-shrink-0 ${
+                            tvCastSending
+                              ? 'bg-rose-400 text-white border-rose-400 cursor-wait'
+                              : activeTVDeviceId
+                                ? 'bg-rose-600 hover:bg-rose-700 text-white border-rose-500 cursor-pointer'
+                                : 'bg-rose-500 hover:bg-rose-600 text-white border-rose-400 cursor-pointer'
+                          }`}
+                          title={
+                            tvCastStatus ||
+                            (activeTVDeviceId
+                              ? '同步当前播放设置到电视'
+                              : '投到电视')
+                          }
+                        >
+                          {tvCastSending ? (
+                            <Loader2 className='w-4 h-4 flex-shrink-0 text-white animate-spin' />
+                          ) : (
+                            <Cast className='w-4 h-4 flex-shrink-0 text-white' />
+                          )}
+                          <span className='hidden lg:inline max-w-0 group-hover:max-w-[100px] overflow-hidden whitespace-nowrap transition-all duration-200 ease-in-out text-white'>
+                            {activeTVDeviceId ? '同步电视' : '投到电视'}
+                          </span>
+                        </button>
+
                         {/* 下载按钮 */}
                         <button
                           onClick={(e) => {

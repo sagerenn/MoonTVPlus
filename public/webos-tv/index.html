@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MoonTVPlus TV</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=534aaa9d4c5b" />
   </head>
   <body>
     <div id="app" class="app-shell">
@@ -158,6 +158,8 @@
               data-controls-open="true"
             >
               <video id="player" class="player" playsinline tabindex="0"></video>
+              <img id="rendered-player" class="rendered-player hidden" alt="" />
+              <div id="player-danmaku-layer" class="player-danmaku-layer"></div>
               <div id="player-center-hint" class="player-center-hint hidden"></div>
               <div id="player-digit-hint" class="player-digit-hint hidden"></div>
               <div id="player-overlay" class="player-overlay">
@@ -209,6 +211,6 @@
       </main>
     </div>
 
-    <script src="./app.js"></script>
+    <script src="./app.js?v=326cfc2d109b"></script>
   </body>
 </html>
