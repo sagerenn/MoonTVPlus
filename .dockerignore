@@ -1,5 +1,16 @@
 .env
 .env*.local
+.git
+.next
+node_modules
+dist
+coverage
+.turbo
+.vercel
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 public/screenshot1.png
 public/screenshot2.png
 public/screenshot3.png

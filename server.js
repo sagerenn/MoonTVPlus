@@ -1,6 +1,12 @@
 // Next.js 自定义服务器 + Socket.IO
+const crypto = require('crypto');
+const dns = require('dns').promises;
+const fs = require('fs');
 const { createServer } = require('http');
+const net = require('net');
+const path = require('path');
 const { parse } = require('url');
+const { spawn } = require('child_process');
 const next = require('next');
 const { Server } = require('socket.io');
 const {
@@ -43,6 +49,525 @@ const port = parseInt(process.env.PORT || '3000', 10);
 
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
+const webOSCompatibilityHlsRoot = process.env.WEBOS_HLS_CACHE_DIR || '/tmp/moontv-webos-hls';
+const webOSCompatibilityHlsSessions = new Map();
+const webOSCompatibilityProfileVersion = 'fmp4-360p-v2';
+
+function setWebOSCompatibilityHeaders(res, contentType, extraHeaders = {}) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
+  res.setHeader('Cache-Control', 'no-store');
+  if (contentType) {
+    res.setHeader('Content-Type', contentType);
+  }
+  Object.entries(extraHeaders).forEach(([key, value]) => res.setHeader(key, value));
+}
+
+function sendWebOSCompatibilityJson(res, statusCode, payload) {
+  setWebOSCompatibilityHeaders(res, 'application/json; charset=utf-8');
+  res.statusCode = statusCode;
+  res.end(JSON.stringify(payload));
+}
+
+function isPrivateIPv4(ip) {
+  const parts = ip.split('.').map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return true;
+  }
+
+  const [a, b] = parts;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    a >= 224
+  );
+}
+
+function isPrivateIPAddress(ip) {
+  if (!ip || !net.isIP(ip)) return true;
+  if (net.isIPv4(ip)) return isPrivateIPv4(ip);
+
+  const normalized = ip.toLowerCase();
+  if (normalized === '::1' || normalized === '::' || normalized.startsWith('fe80:') || normalized.startsWith('fc') || normalized.startsWith('fd')) {
+    return true;
+  }
+  if (normalized.startsWith('::ffff:')) {
+    return isPrivateIPv4(normalized.slice(7));
+  }
+  return false;
+}
+
+async function assertPublicHttpUrl(rawUrl) {
+  let url;
+  try {
+    url = new URL(String(rawUrl || ''));
+  } catch {
+    throw new Error('Invalid source URL');
+  }
+
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw new Error('Unsupported source protocol');
+  }
+
+  const urlHostname = url.hostname.toLowerCase();
+  if (urlHostname === 'localhost' || urlHostname.endsWith('.localhost')) {
+    throw new Error('Local source URLs are not allowed');
+  }
+
+  if (net.isIP(urlHostname)) {
+    if (isPrivateIPAddress(urlHostname)) {
+      throw new Error('Private source URLs are not allowed');
+    }
+    return url;
+  }
+
+  const addresses = await dns.lookup(urlHostname, { all: true });
+  if (!addresses.length || addresses.some((address) => isPrivateIPAddress(address.address))) {
+    throw new Error('Private source URLs are not allowed');
+  }
+
+  return url;
+}
+
+function resolveWebOSCompatibilityStart(value) {
+  const start = Number(value || 0);
+  if (!Number.isFinite(start) || start < 0) {
+    return 0;
+  }
+  return Math.floor(Math.min(start, 24 * 60 * 60));
+}
+
+function buildWebOSCompatibilitySessionKey(sourceUrl, source, start) {
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify([webOSCompatibilityProfileVersion, sourceUrl, source || '', start]))
+    .digest('hex')
+    .slice(0, 32);
+}
+
+function getWebOSCompatibilitySessionDir(key) {
+  return path.join(webOSCompatibilityHlsRoot, key);
+}
+
+function getWebOSCompatibilitySessionLog(session) {
+  try {
+    return fs.readFileSync(path.join(session.dir, 'ffmpeg.log'), 'utf8').slice(-1200);
+  } catch {
+    return '';
+  }
+}
+
+function getFirstPlaylistSegment(playlist) {
+  const line = playlist
+    .split('\n')
+    .map((item) => item.trim())
+    .find((item) => item && !item.startsWith('#') && /^segment\d+\.(?:m4s|ts)$/.test(item));
+  return line || '';
+}
+
+async function waitForWebOSCompatibilityFile(filePath, session, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const stat = await fs.promises.stat(filePath);
+      if (stat.size > 0) {
+        return true;
+      }
+    } catch {
+      // Wait until ffmpeg writes the file.
+    }
+
+    if (session?.ended && Date.now() > session.startedAt + 1500) {
+      break;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  }
+  return false;
+}
+
+async function waitForWebOSCompatibilityPlaylist(session, timeoutMs = 45000) {
+  const playlistPath = path.join(session.dir, 'index.m3u8');
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const playlist = await fs.promises.readFile(playlistPath, 'utf8');
+      const firstSegment = getFirstPlaylistSegment(playlist);
+      if (firstSegment) {
+        const segmentReady = await waitForWebOSCompatibilityFile(path.join(session.dir, firstSegment), session, 800);
+        if (segmentReady) {
+          return true;
+        }
+      }
+    } catch {
+      // Wait until ffmpeg writes the playlist.
+    }
+
+    if (session.ended && Date.now() > session.startedAt + 1500) {
+      break;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  throw new Error(`webOS compatibility stream did not become ready. ${getWebOSCompatibilitySessionLog(session)}`);
+}
+
+function getWebOSCompatibilityRequestOrigin(req) {
+  const requestHost = req.headers.host;
+  if (!requestHost) {
+    return '';
+  }
+
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const proto = forwardedProto || (req.socket && req.socket.encrypted ? 'https' : 'http');
+  return `${proto}://${requestHost}`;
+}
+
+function buildWebOSCompatibilityMediaUrl(key, filename, origin) {
+  const mediaPath = `/api/webos-hls/${key}/${filename}`;
+  return origin ? `${origin}${mediaPath}` : mediaPath;
+}
+
+function rewriteWebOSCompatibilityPlaylistMapLine(line, key, origin) {
+  return line.replace(/URI="([^"]+)"/i, (match, uri) => {
+    if (!uri || /^[a-z][a-z0-9+.-]*:/i.test(uri) || uri.startsWith('/')) {
+      return match;
+    }
+
+    return `URI="${buildWebOSCompatibilityMediaUrl(key, uri, origin)}"`;
+  });
+}
+
+function rewriteWebOSCompatibilityPlaylist(playlist, key, origin) {
+  return playlist
+    .split('\n')
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        return line;
+      }
+      if (/^#EXT-X-VERSION:/i.test(trimmed)) {
+        return '#EXT-X-VERSION:7';
+      }
+      if (/^#EXT-X-INDEPENDENT-SEGMENTS/i.test(trimmed)) {
+        return '';
+      }
+      if (/^#EXT-X-MAP:/i.test(trimmed)) {
+        return rewriteWebOSCompatibilityPlaylistMapLine(line, key, origin);
+      }
+      if (trimmed.startsWith('#')) {
+        return line;
+      }
+      if (/^segment\d+\.(?:m4s|ts)$/.test(trimmed)) {
+        return buildWebOSCompatibilityMediaUrl(key, trimmed, origin);
+      }
+      return line;
+    })
+    .join('\n');
+}
+
+function isWebOSCompatibilityMediaFilename(filename) {
+  return filename === 'init.mp4' || /^segment\d+\.(?:m4s|ts)$/.test(filename);
+}
+
+function getWebOSCompatibilityMediaContentType(filename) {
+  if (filename === 'init.mp4') {
+    return 'video/mp4';
+  }
+  if (/\.m4s$/i.test(filename)) {
+    return 'video/iso.segment';
+  }
+  return 'video/mp2t';
+}
+
+async function startWebOSCompatibilitySession(sourceUrl, source, start) {
+  await assertPublicHttpUrl(sourceUrl);
+
+  const key = buildWebOSCompatibilitySessionKey(sourceUrl, source, start);
+  const existing = webOSCompatibilityHlsSessions.get(key);
+  if (existing) {
+    existing.lastAccess = Date.now();
+    return existing;
+  }
+
+  const dir = getWebOSCompatibilitySessionDir(key);
+  await fs.promises.rm(dir, { recursive: true, force: true });
+  await fs.promises.mkdir(dir, { recursive: true });
+
+  const session = {
+    key,
+    dir,
+    sourceUrl,
+    source,
+    start,
+    startedAt: Date.now(),
+    lastAccess: Date.now(),
+    ended: false,
+    process: null,
+  };
+  webOSCompatibilityHlsSessions.set(key, session);
+
+  const sourceOrigin = new URL(sourceUrl).origin + '/';
+  const args = [
+    '-hide_banner',
+    '-loglevel',
+    'warning',
+    '-y',
+    '-user_agent',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    '-referer',
+    sourceOrigin,
+    '-reconnect',
+    '1',
+    '-reconnect_streamed',
+    '1',
+    '-reconnect_delay_max',
+    '2',
+  ];
+  if (start > 0) {
+    args.push('-ss', String(start));
+  }
+  args.push(
+    '-i',
+    sourceUrl,
+    '-map',
+    '0:v:0',
+    '-map',
+    '0:a:0?',
+    '-vf',
+    'scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS',
+    '-af',
+    'aresample=async=1:first_pts=0,asetpts=PTS-STARTPTS',
+    '-r',
+    '24',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'ultrafast',
+    '-profile:v',
+    'baseline',
+    '-level',
+    '3.0',
+    '-pix_fmt',
+    'yuv420p',
+    '-movflags',
+    '+faststart',
+    '-x264-params',
+    'keyint=48:min-keyint=48:scenecut=0:ref=1:bframes=0:cabac=0',
+    '-g',
+    '48',
+    '-keyint_min',
+    '48',
+    '-sc_threshold',
+    '0',
+    '-b:v',
+    '700k',
+    '-maxrate',
+    '850k',
+    '-bufsize',
+    '1700k',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '96k',
+    '-ac',
+    '2',
+    '-ar',
+    '44100',
+    '-f',
+    'hls',
+    '-hls_time',
+    '4',
+    '-hls_playlist_type',
+    'event',
+    '-hls_segment_type',
+    'fmp4',
+    '-hls_fmp4_init_filename',
+    'init.mp4',
+    '-hls_flags',
+    'independent_segments',
+    '-hls_segment_filename',
+    path.join(dir, 'segment%05d.m4s'),
+    path.join(dir, 'index.m3u8')
+  );
+
+  const logStream = fs.createWriteStream(path.join(dir, 'ffmpeg.log'), { flags: 'a' });
+  logStream.write(`\n[${new Date().toISOString()}] ffmpeg ${args.map((arg) => JSON.stringify(arg)).join(' ')}\n`);
+  const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  session.process = child;
+  child.stderr.pipe(logStream);
+  child.on('exit', (code, signal) => {
+    session.ended = true;
+    session.exitCode = code;
+    session.exitSignal = signal;
+    logStream.end(`\n[${new Date().toISOString()}] ffmpeg exited code=${code} signal=${signal}\n`);
+  });
+  child.on('error', (error) => {
+    session.ended = true;
+    session.error = error.message;
+    logStream.end(`\n[${new Date().toISOString()}] ffmpeg error ${error.message}\n`);
+  });
+
+  return session;
+}
+
+async function serveWebOSCompatibilityPlaylist(req, res, parsedUrl) {
+  const sourceUrl = parsedUrl.query.url;
+  const source = String(parsedUrl.query.source || 'directplay');
+  const start = resolveWebOSCompatibilityStart(parsedUrl.query.start);
+
+  if (!sourceUrl) {
+    sendWebOSCompatibilityJson(res, 400, { error: 'Missing source URL' });
+    return;
+  }
+
+  const session = await startWebOSCompatibilitySession(String(sourceUrl), source, start);
+  await waitForWebOSCompatibilityPlaylist(session);
+  const playlistPath = path.join(session.dir, 'index.m3u8');
+  const playlist = await fs.promises.readFile(playlistPath, 'utf8');
+  const body = rewriteWebOSCompatibilityPlaylist(playlist, session.key, getWebOSCompatibilityRequestOrigin(req));
+  setWebOSCompatibilityHeaders(res, 'application/vnd.apple.mpegurl; charset=utf-8');
+  res.statusCode = 200;
+  res.end(body);
+}
+
+async function serveWebOSCompatibilityMedia(req, res, key, filename) {
+  if (!/^[a-f0-9]{32}$/.test(key) || !isWebOSCompatibilityMediaFilename(filename)) {
+    sendWebOSCompatibilityJson(res, 404, { error: 'Not found' });
+    return;
+  }
+
+  const session = webOSCompatibilityHlsSessions.get(key) || {
+    key,
+    dir: getWebOSCompatibilitySessionDir(key),
+    startedAt: Date.now(),
+    ended: false,
+  };
+  const filePath = path.join(session.dir, filename);
+  const ready = await waitForWebOSCompatibilityFile(filePath, session, 25000);
+  if (!ready) {
+    sendWebOSCompatibilityJson(res, 404, { error: 'Segment not ready' });
+    return;
+  }
+
+  const stat = await fs.promises.stat(filePath);
+  let start = 0;
+  let end = stat.size - 1;
+  let statusCode = 200;
+  const range = req.headers.range || '';
+  const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(range);
+  const headers = {
+    'Accept-Ranges': 'bytes',
+  };
+
+  if (rangeMatch) {
+    start = rangeMatch[1] ? Number(rangeMatch[1]) : 0;
+    end = rangeMatch[2] ? Number(rangeMatch[2]) : end;
+    if (start >= stat.size || end < start) {
+      setWebOSCompatibilityHeaders(res, getWebOSCompatibilityMediaContentType(filename), { 'Content-Range': `bytes */${stat.size}` });
+      res.statusCode = 416;
+      res.end();
+      return;
+    }
+    end = Math.min(end, stat.size - 1);
+    statusCode = 206;
+    headers['Content-Range'] = `bytes ${start}-${end}/${stat.size}`;
+  }
+
+  headers['Content-Length'] = String(end - start + 1);
+  setWebOSCompatibilityHeaders(res, getWebOSCompatibilityMediaContentType(filename), headers);
+  res.statusCode = statusCode;
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
+  fs.createReadStream(filePath, { start, end }).pipe(res);
+}
+
+function getBoolQueryValue(query, name) {
+  const expectedName = String(name || '').toLowerCase();
+  for (const [key, value] of Object.entries(query || {})) {
+    if (String(key || '').toLowerCase() !== expectedName) {
+      continue;
+    }
+
+    const rawValue = Array.isArray(value) ? value[0] : value;
+    return /^(1|true|yes|on)$/i.test(String(rawValue || '').trim());
+  }
+
+  return false;
+}
+
+function isWebOSTranscodeProxyRequest(parsedUrl) {
+  return (
+    (parsedUrl.pathname || '') === '/api/proxy/vod/m3u8' &&
+    getBoolQueryValue(parsedUrl.query, 'Transcode')
+  );
+}
+
+async function handleWebOSCompatibilityHls(req, res, parsedUrl) {
+  const pathname = parsedUrl.pathname || '';
+  if (!pathname.startsWith('/api/webos-hls/') && !isWebOSTranscodeProxyRequest(parsedUrl)) {
+    return false;
+  }
+
+  if (req.method === 'OPTIONS') {
+    setWebOSCompatibilityHeaders(res);
+    res.statusCode = 204;
+    res.end();
+    return true;
+  }
+
+  if (!['GET', 'HEAD'].includes(req.method)) {
+    sendWebOSCompatibilityJson(res, 405, { error: 'Method not allowed' });
+    return true;
+  }
+
+  try {
+    if (isWebOSTranscodeProxyRequest(parsedUrl)) {
+      await serveWebOSCompatibilityPlaylist(req, res, parsedUrl);
+      return true;
+    }
+
+    const mediaMatch = /^\/api\/webos-hls\/([a-f0-9]{32})\/(init\.mp4|segment\d+\.(?:m4s|ts))$/.exec(pathname);
+    if (mediaMatch) {
+      await serveWebOSCompatibilityMedia(req, res, mediaMatch[1], mediaMatch[2]);
+      return true;
+    }
+
+    sendWebOSCompatibilityJson(res, 404, { error: 'Not found' });
+    return true;
+  } catch (error) {
+    console.error('[webOS HLS] request failed:', error);
+    sendWebOSCompatibilityJson(res, 500, {
+      error: 'webOS compatibility stream failed',
+      details: error instanceof Error ? error.message : String(error),
+    });
+    return true;
+  }
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, session] of webOSCompatibilityHlsSessions.entries()) {
+    if (now - session.lastAccess < 45 * 60 * 1000) {
+      continue;
+    }
+
+    if (session.process && !session.ended) {
+      session.process.kill('SIGTERM');
+    }
+    webOSCompatibilityHlsSessions.delete(key);
+  }
+}, 10 * 60 * 1000).unref?.();
 
 // 读取观影室配置的辅助函数
 async function getWatchRoomConfig() {
@@ -810,6 +1335,9 @@ app.prepare().then(async () => {
   const httpServer = createServer(async (req, res) => {
     try {
       const parsedUrl = parse(req.url, true);
+      if (await handleWebOSCompatibilityHls(req, res, parsedUrl)) {
+        return;
+      }
       await handle(req, res, parsedUrl);
     } catch (err) {
       console.error('Error occurred handling', req.url, err);

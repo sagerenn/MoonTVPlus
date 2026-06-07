@@ -51,7 +51,8 @@ FROM node:24-alpine AS runner
 ARG ALPINE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/alpine
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 
-RUN sed -i "s#https\\?://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk/repositories
+RUN sed -i "s#https\\?://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk/repositories \
+  && apk add --no-cache ffmpeg
 
 # 启用 corepack 并激活 pnpm（用于安装额外依赖）
 RUN npm config set registry "$NPM_REGISTRY" \

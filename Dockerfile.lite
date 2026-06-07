@@ -38,6 +38,9 @@ ENV OFFLINE_DOWNLOAD_DIR=/data
 
 RUN pnpm run build
 
+# 提取自定义 server.js 运行时依赖；standalone 只覆盖 Next 追踪到的依赖。
+RUN pnpm deploy --filter=. --prod --legacy /tmp/prod-deps
+
 # ---- 第 3 阶段：生成 lite 运行时镜像 ----
 FROM node:24-alpine AS runner
 
@@ -45,6 +48,7 @@ ARG ALPINE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/alpine
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 
 RUN sed -i "s#https\\?://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk/repositories \
+  && apk add --no-cache ffmpeg \
   && npm config set registry "$NPM_REGISTRY"
 
 RUN addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
@@ -63,10 +67,13 @@ ENV OFFLINE_DOWNLOAD_DIR=/data
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/scripts ./scripts
 COPY --from=builder --chown=nextjs:nodejs /app/start.js ./start.js
+# Lite also uses the custom server entrypoint for Socket.IO and webOS transcode routes.
+COPY --from=builder --chown=nextjs:nodejs /app/server.js ./server.js
 # 保持与完整镜像一致：如果运行时 server.js 引用了电视遥控 hub，确保该模块存在。
 COPY --from=builder --chown=nextjs:nodejs /app/src/lib/tv-remote-hub.js ./src/lib/tv-remote-hub.js
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /tmp/prod-deps/node_modules ./node_modules
 
 # 准备默认离线下载目录
 RUN mkdir -p "$OFFLINE_DOWNLOAD_DIR" && chown -R nextjs:nodejs "$OFFLINE_DOWNLOAD_DIR"
