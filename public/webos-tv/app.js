@@ -57,6 +57,8 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   let forcedHlsSource = '';
   let failedHlsSource = '';
   let nativeHlsFallbackTimer = 0;
+  let webOSTranscodeFallbackSource = '';
+  let webOSTranscodeFallbackStart = 0;
   let playbackDebugEvents = [];
   let lastHlsErrorDebug = null;
   let lastPlayerErrorDebug = null;
@@ -678,7 +680,9 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
           sameOrigin: state.isHostedOnSameOrigin,
           detailTitle: state.detail && state.detail.title,
           selectedEpisodeIndex: state.selectedEpisodeIndex,
-          compatibilityOffset: webOSCompatibilityPlaybackOffset
+          compatibilityOffset: webOSCompatibilityPlaybackOffset,
+          transcodeFallbackSource: webOSTranscodeFallbackSource,
+          transcodeFallbackStart: webOSTranscodeFallbackStart
         },
         hls: {
           type: typeof window.Hls,
@@ -704,6 +708,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
           duration: player.duration,
           paused: player.paused,
           playbackRate: player.playbackRate,
+          buffered: getPlayerBufferedRanges(),
           error: player.error ? {
             code: player.error.code,
             message: player.error.message
@@ -721,7 +726,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
           naturalWidth: elements.renderedPlayer.naturalWidth || 0,
           naturalHeight: elements.renderedPlayer.naturalHeight || 0
         } : null,
-        events: playbackDebugEvents.slice(-80)
+        events: playbackDebugEvents.slice(-160)
       };
     };
   }
@@ -731,8 +736,8 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       type: String(type || ''),
       data: data || null
     });
-    if (playbackDebugEvents.length > 120) {
-      playbackDebugEvents = playbackDebugEvents.slice(-80);
+    if (playbackDebugEvents.length > 240) {
+      playbackDebugEvents = playbackDebugEvents.slice(-160);
     }
   }
   function compactHlsError(data) {
@@ -761,6 +766,21 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
         message: player.error.message
       } : null
     };
+  }
+  function getPlayerBufferedRanges() {
+    const player = elements.player;
+    const ranges = [];
+    if (!player || !player.buffered) {
+      return ranges;
+    }
+    for (let index = 0; index < player.buffered.length; index += 1) {
+      try {
+        ranges.push([player.buffered.start(index), player.buffered.end(index)]);
+      } catch (error) {
+        return ranges;
+      }
+    }
+    return ranges;
   }
   function setStatus(message, tone) {
     recordPlaybackDebugEvent('status', {
@@ -981,7 +1001,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     const title = state.detail && Array.isArray(state.detail.episodes_titles) && state.detail.episodes_titles[state.selectedEpisodeIndex] ? state.detail.episodes_titles[state.selectedEpisodeIndex] : 'Selected episode';
     elements.playerSummary.textContent = title;
     elements.playerOverlayTitle.textContent = title;
-    elements.playerEngineBadge.textContent = isRenderedPlaybackUrl(state.playerUrl) ? 'Rendered' : shouldUseHlsJs(state.playerUrl) ? 'HLS' : 'Native';
+    elements.playerEngineBadge.textContent = isRenderedPlaybackUrl(state.playerUrl) ? 'Rendered' : isWebOSTranscodePlaybackUrl(state.playerUrl) ? 'Transcode' : shouldUseHlsJs(state.playerUrl) ? 'HLS' : 'Native';
     hidePlayerHint();
     const subtitleTracksChanged = syncManagedSubtitleTracks();
     const nextPlayerEngine = isRenderedPlaybackUrl(state.playerUrl) ? 'rendered' : shouldUseHlsJs(state.playerUrl) ? 'hls' : 'native';
@@ -1178,6 +1198,12 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   function isRenderedPlaybackUrl(url) {
     return getUrlPath(url).indexOf('/api/webos-mjpeg/stream.mjpg') === 0;
   }
+  function isWebOSTranscodePlaybackUrl(url) {
+    return getUrlPath(url).indexOf('/api/proxy/vod/m3u8') === 0 && getUrlBoolQueryValue(url, 'Transcode');
+  }
+  function buildWebOSTranscodePlaybackUrl(rawEpisodeUrl, source, start) {
+    return '/api/proxy/vod/m3u8?url=' + encodeURIComponent(rawEpisodeUrl) + '&source=' + encodeURIComponent(source || 'directplay') + '&Transcode=true&start=' + encodeURIComponent(String(resolveWebOSCompatibilityStartValue(start)));
+  }
   function getUrlQueryValue(url, name) {
     const raw = String(url || '');
     const queryIndex = raw.indexOf('?');
@@ -1195,6 +1221,26 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       }
     }
     return '';
+  }
+  function getUrlBoolQueryValue(url, name) {
+    const raw = String(url || '');
+    const queryIndex = raw.indexOf('?');
+    if (queryIndex === -1) {
+      return false;
+    }
+    const expectedName = String(name || '').toLowerCase();
+    const query = raw.slice(queryIndex + 1).split('#')[0].split('&');
+    for (let index = 0; index < query.length; index += 1) {
+      const entry = query[index];
+      const separator = entry.indexOf('=');
+      const key = separator === -1 ? entry : entry.slice(0, separator);
+      if (decodeURIComponent(key.replace(/\+/g, ' ')).toLowerCase() !== expectedName) {
+        continue;
+      }
+      const value = separator === -1 ? 'true' : decodeURIComponent(entry.slice(separator + 1).replace(/\+/g, ' '));
+      return /^(1|true|yes|on)$/i.test(String(value || '').trim());
+    }
+    return false;
   }
   function getRenderedPlaybackCurrentTime() {
     if (!renderedPlaybackActive) {
@@ -1591,7 +1637,9 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     return '';
   }
   function scheduleNativeHlsFallback(url, attachToken) {
-    if (!canUseHlsJs(url) || forcedHlsSource === url || failedHlsSource === url) {
+    const canUseWebOSTranscode = shouldUseWebOSTranscodeFallback(url);
+    const canUseClientHls = canUseHlsJs(url) && forcedHlsSource !== url && failedHlsSource !== url;
+    if (!canUseWebOSTranscode && !canUseClientHls) {
       return;
     }
     const startingTime = Number(elements.player.currentTime || 0);
@@ -1600,7 +1648,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       if (attachToken !== playerAttachToken || activePlayerEngine !== 'native' || activePlayerSource !== url || !state.playerUrl || elements.player.readyState >= 2 || Number(elements.player.currentTime || 0) > startingTime + 0.5) {
         return;
       }
-      triggerHlsFallbackFromNative('Native HLS stalled. Trying HLS fallback.');
+      triggerHlsFallbackFromNative('Native HLS stalled. Trying compatibility fallback.');
     }, 8000);
   }
   function attachHlsSource(_x2, _x3) {
@@ -1636,10 +1684,17 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
         });
         return false;
       }
-      activeHlsInstance = new Hls({
+      const hlsConfig = {
         enableWorker: false,
         lowLatencyMode: false
-      });
+      };
+      if (isWebOSTranscodePlaybackUrl(url)) {
+        hlsConfig.autoStartLoad = false;
+        hlsConfig.startPosition = 0;
+        hlsConfig.maxBufferLength = 12;
+        hlsConfig.maxMaxBufferLength = 20;
+      }
+      activeHlsInstance = new Hls(hlsConfig);
       bindHlsEvents(Hls, activeHlsInstance, url, attachToken);
       activeHlsInstance.attachMedia(elements.player);
       return true;
@@ -1650,6 +1705,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     let appendErrorCount = 0;
     let fatalMediaErrorCount = 0;
     let networkErrorCount = 0;
+    let transcodeStartNudged = false;
     function markHlsSourceFailed(message) {
       if (attachToken !== playerAttachToken || activeHlsInstance !== hls) {
         return;
@@ -1686,7 +1742,58 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
         url: url,
         levels: data && data.levels ? data.levels.length : 0
       });
+      if (isWebOSTranscodePlaybackUrl(url)) {
+        recordPlaybackDebugEvent('hls-transcode-start-load', {
+          url: url,
+          startPosition: 0
+        });
+        hls.startLoad(0);
+      }
       scheduleSubtitleRefresh();
+    });
+    hls.on(Hls.Events.LEVEL_LOADED, function (_event, data) {
+      if (attachToken !== playerAttachToken || activeHlsInstance !== hls) {
+        return;
+      }
+      recordPlaybackDebugEvent('hls-level-loaded', {
+        url: url,
+        level: data && data.level,
+        live: Boolean(data && data.details && data.details.live),
+        fragments: data && data.details && data.details.fragments ? data.details.fragments.length : 0,
+        totalduration: data && data.details && data.details.totalduration
+      });
+    });
+    hls.on(Hls.Events.FRAG_LOADING, function (_event, data) {
+      if (attachToken !== playerAttachToken || activeHlsInstance !== hls) {
+        return;
+      }
+      recordPlaybackDebugEvent('hls-frag-loading', compactHlsFragment(data));
+    });
+    hls.on(Hls.Events.FRAG_LOADED, function (_event, data) {
+      if (attachToken !== playerAttachToken || activeHlsInstance !== hls) {
+        return;
+      }
+      recordPlaybackDebugEvent('hls-frag-loaded', compactHlsFragment(data));
+    });
+    hls.on(Hls.Events.FRAG_BUFFERED, function (_event, data) {
+      if (attachToken !== playerAttachToken || activeHlsInstance !== hls) {
+        return;
+      }
+      recordPlaybackDebugEvent('hls-frag-buffered', Object.assign(compactHlsFragment(data), {
+        buffered: getPlayerBufferedRanges()
+      }));
+      if (!transcodeStartNudged && isWebOSTranscodePlaybackUrl(url) && elements.player && elements.player.currentTime < 0.1 && getPlayerBufferedRanges().length) {
+        transcodeStartNudged = nudgePlayerToFirstBufferedRange();
+      }
+    });
+    hls.on(Hls.Events.BUFFER_APPENDED, function (_event, data) {
+      if (attachToken !== playerAttachToken || activeHlsInstance !== hls) {
+        return;
+      }
+      recordPlaybackDebugEvent('hls-buffer-appended', {
+        type: data && data.type,
+        buffered: getPlayerBufferedRanges()
+      });
     });
     hls.on(Hls.Events.ERROR, function (_event, data) {
       if (!data || attachToken !== playerAttachToken || activeHlsInstance !== hls) {
@@ -1734,6 +1841,45 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       activePlayerEngine = 'native';
       attachNativeSource(url, attachToken);
     });
+  }
+  function compactHlsFragment(data) {
+    const frag = data && data.frag;
+    const stats = data && data.stats || frag && frag.stats;
+    return {
+      type: frag && frag.type,
+      sn: frag && frag.sn,
+      level: frag && frag.level,
+      url: frag && frag.url,
+      start: frag && frag.start,
+      duration: frag && frag.duration,
+      loaded: stats && stats.loaded,
+      total: stats && stats.total
+    };
+  }
+  function nudgePlayerToFirstBufferedRange() {
+    const ranges = getPlayerBufferedRanges();
+    if (!ranges.length || !elements.player) {
+      return false;
+    }
+    const firstStart = Number(ranges[0][0] || 0);
+    const target = isFinite(firstStart) ? Math.max(0, firstStart + 0.05) : 0;
+    try {
+      elements.player.currentTime = target;
+      recordPlaybackDebugEvent('hls-transcode-start-nudge', {
+        target: target,
+        buffered: ranges
+      });
+      playPlayer().catch(function () {
+        return null;
+      });
+      return true;
+    } catch (error) {
+      recordPlaybackDebugEvent('hls-transcode-start-nudge-failed', {
+        message: error && error.message,
+        buffered: ranges
+      });
+    }
+    return false;
   }
   function loadHlsLibrary() {
     if (typeof window === 'undefined') {
@@ -2410,6 +2556,8 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       pendingAutoplay = Boolean(options && options.autoplay);
       forcedHlsSource = '';
       failedHlsSource = '';
+      webOSTranscodeFallbackSource = '';
+      webOSTranscodeFallbackStart = 0;
       webOSCompatibilityPlaybackOffset = 0;
       suppressResumeSeekForCurrentLoad = Boolean(options && options.resume === false);
       persistSelection();
@@ -2467,7 +2615,8 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       }
       const looksLikeM3u8 = /\.m3u($|\?)/i.test(rawEpisodeUrl) || rawEpisodeUrl.toLowerCase().indexOf('.m3u8') !== -1 || !/\.(mp4|webm|m4v|mov|avi|flv)(\?|$)/i.test(rawEpisodeUrl);
       if (shouldUseServerHlsProxyForWebOS(looksLikeM3u8)) {
-        return buildWebOSCompatibilityHlsUrl(rawEpisodeUrl, detail, index);
+        prepareWebOSTranscodeFallback(rawEpisodeUrl, detail, index);
+        return rawEpisodeUrl;
       }
       if (detail.proxyMode && looksLikeM3u8 && state.isHostedOnSameOrigin) {
         return '/api/proxy/vod/m3u8?url=' + encodeURIComponent(rawEpisodeUrl) + '&source=' + encodeURIComponent(detail.source);
@@ -2481,7 +2630,17 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   }
   function buildWebOSCompatibilityHlsUrl(rawEpisodeUrl, detail, index) {
     webOSCompatibilityPlaybackOffset = resolveWebOSCompatibilityStartOffset(detail, index);
-    return buildWebOSRenderedPlaybackUrl(rawEpisodeUrl, detail && detail.source || 'directplay', webOSCompatibilityPlaybackOffset);
+    return buildWebOSTranscodePlaybackUrl(rawEpisodeUrl, detail && detail.source || 'directplay', webOSCompatibilityPlaybackOffset);
+  }
+  function prepareWebOSTranscodeFallback(rawEpisodeUrl, detail, index) {
+    webOSTranscodeFallbackSource = String(rawEpisodeUrl || '');
+    webOSTranscodeFallbackStart = resolveWebOSCompatibilityStartOffset(detail, index);
+    webOSCompatibilityPlaybackOffset = 0;
+    recordPlaybackDebugEvent('webos-direct-first', {
+      url: webOSTranscodeFallbackSource,
+      source: detail && detail.source || 'directplay',
+      start: webOSTranscodeFallbackStart
+    });
   }
   function resolveWebOSCompatibilityStartOffset(detail, index) {
     let start = 0;
@@ -2500,6 +2659,9 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     return Math.floor(Math.min(start, 24 * 60 * 60));
   }
   function getWebOSCompatibilityOffset() {
+    if (!renderedPlaybackActive && !isWebOSTranscodePlaybackUrl(state.playerUrl)) {
+      return 0;
+    }
     const offset = Number(webOSCompatibilityPlaybackOffset || 0);
     return isFinite(offset) && offset > 0 ? offset : 0;
   }
@@ -2707,6 +2869,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       duration: player.duration,
       paused: player.paused,
       playbackRate: player.playbackRate,
+      buffered: getPlayerBufferedRanges(),
       error: player.error ? {
         code: player.error.code,
         message: player.error.message
@@ -2750,9 +2913,12 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     lastPlayerErrorDebug = compactPlayerError();
     recordPlaybackDebugEvent('player-error', lastPlayerErrorDebug);
     updatePlayerOverlay();
-    triggerHlsFallbackFromNative('Native HLS failed. Trying HLS fallback.');
+    triggerHlsFallbackFromNative('Native HLS failed. Trying compatibility fallback.');
   }
   function triggerHlsFallbackFromNative(message) {
+    if (triggerWebOSTranscodeFallbackFromNative(message)) {
+      return;
+    }
     if (!state.playerUrl || activePlayerEngine !== 'native' || !canUseHlsJs(state.playerUrl) || forcedHlsSource === state.playerUrl || failedHlsSource === state.playerUrl || hlsJsUnavailable) {
       return;
     }
@@ -2772,6 +2938,53 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     }).catch(function (error) {
       setStatus(error.message || 'Playback setup failed.', 'error');
     });
+  }
+  function shouldUseWebOSTranscodeFallback(url) {
+    return Boolean(state.isHostedOnSameOrigin && isWebOSBrowser() && isHlsStreamUrl(url) && webOSTranscodeFallbackSource && !isWebOSTranscodePlaybackUrl(url));
+  }
+  function resolveWebOSTranscodeFallbackStart() {
+    const playerTime = Number(elements.player && elements.player.currentTime || 0);
+    if (isFinite(playerTime) && playerTime > 1) {
+      return playerTime;
+    }
+    if (pendingRemotePlaybackState && Number(pendingRemotePlaybackState.currentTime || 0) > 1) {
+      return Number(pendingRemotePlaybackState.currentTime || 0);
+    }
+    const start = Number(webOSTranscodeFallbackStart || 0);
+    return isFinite(start) && start > 0 ? start : 0;
+  }
+  function triggerWebOSTranscodeFallbackFromNative(message) {
+    if (!state.playerUrl || activePlayerEngine !== 'native' || !shouldUseWebOSTranscodeFallback(state.playerUrl)) {
+      return false;
+    }
+    const shouldResume = !getPlayerPaused() || pendingAutoplay || Boolean(pendingRemotePlaybackState && pendingRemotePlaybackState.paused !== true);
+    const start = resolveWebOSTranscodeFallbackStart();
+    const source = state.detail && state.detail.source || 'directplay';
+    const transcodeUrl = buildWebOSTranscodePlaybackUrl(webOSTranscodeFallbackSource, source, start);
+    webOSTranscodeFallbackStart = start;
+    webOSCompatibilityPlaybackOffset = resolveWebOSCompatibilityStartValue(start);
+    state.playerUrl = transcodeUrl;
+    activePlayerSource = transcodeUrl;
+    activePlayerEngine = 'native';
+    pendingAutoplay = shouldResume;
+    elements.playerEngineBadge.textContent = 'Transcode';
+    recordPlaybackDebugEvent('webos-transcode-fallback', {
+      originalUrl: webOSTranscodeFallbackSource,
+      proxyUrl: transcodeUrl,
+      message: message,
+      start: webOSCompatibilityPlaybackOffset,
+      shouldResume: shouldResume
+    });
+    setStatus(message, 'error');
+    attachPlayerSource(transcodeUrl).then(function () {
+      if (shouldResume) {
+        playPlayerSoon();
+      }
+    }).catch(function (error) {
+      pendingAutoplay = false;
+      setStatus(error.message || 'Playback setup failed.', 'error');
+    });
+    return true;
   }
   function persistPlayRecord(_x18) {
     return _persistPlayRecord.apply(this, arguments);
@@ -3227,9 +3440,41 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   }
   function applyRemotePlaybackState(command) {
     const playback = normalizeRemotePlaybackState(command);
+    if (restartWebOSTranscodePlaybackFromRemote(playback)) {
+      return;
+    }
     pendingRemotePlaybackState = playback;
     enterRemoteCastFullscreen();
     applyPendingRemotePlaybackState();
+  }
+  function restartWebOSTranscodePlaybackFromRemote(playback) {
+    if (!isWebOSBrowser() || !state.isHostedOnSameOrigin || !isWebOSTranscodePlaybackUrl(state.playerUrl) || !webOSTranscodeFallbackSource) {
+      return false;
+    }
+    const start = resolveWebOSCompatibilityStartValue(playback && playback.currentTime || 0);
+    const source = state.detail && state.detail.source || 'directplay';
+    const transcodeUrl = buildWebOSTranscodePlaybackUrl(webOSTranscodeFallbackSource, source, start);
+    const nextPlayback = Object.assign({}, playback, {
+      currentTime: start
+    });
+    webOSTranscodeFallbackStart = start;
+    webOSCompatibilityPlaybackOffset = start;
+    pendingRemotePlaybackState = nextPlayback;
+    pendingAutoplay = nextPlayback.paused !== true;
+    forcedHlsSource = '';
+    failedHlsSource = '';
+    activePlayerSource = '';
+    activePlayerEngine = '';
+    state.playerUrl = transcodeUrl;
+    recordPlaybackDebugEvent('webos-transcode-restart-sync', {
+      proxyUrl: transcodeUrl,
+      start: start,
+      paused: nextPlayback.paused,
+      playbackRate: nextPlayback.playbackRate
+    });
+    enterRemoteCastFullscreen();
+    renderPlayer();
+    return true;
   }
   function applyPendingRemotePlaybackState() {
     if (!pendingRemotePlaybackState || !elements.player) {

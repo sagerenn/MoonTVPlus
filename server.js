@@ -51,6 +51,7 @@ const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 const webOSCompatibilityHlsRoot = process.env.WEBOS_HLS_CACHE_DIR || '/tmp/moontv-webos-hls';
 const webOSCompatibilityHlsSessions = new Map();
+const webOSCompatibilityProfileVersion = 'fmp4-360p-v2';
 
 function setWebOSCompatibilityHeaders(res, contentType, extraHeaders = {}) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -146,7 +147,7 @@ function resolveWebOSCompatibilityStart(value) {
 function buildWebOSCompatibilitySessionKey(sourceUrl, source, start) {
   return crypto
     .createHash('sha256')
-    .update(JSON.stringify([sourceUrl, source || '', start]))
+    .update(JSON.stringify([webOSCompatibilityProfileVersion, sourceUrl, source || '', start]))
     .digest('hex')
     .slice(0, 32);
 }
@@ -167,7 +168,7 @@ function getFirstPlaylistSegment(playlist) {
   const line = playlist
     .split('\n')
     .map((item) => item.trim())
-    .find((item) => item && !item.startsWith('#') && /^segment\d+\.ts$/.test(item));
+    .find((item) => item && !item.startsWith('#') && /^segment\d+\.(?:m4s|ts)$/.test(item));
   return line || '';
 }
 
@@ -219,20 +220,72 @@ async function waitForWebOSCompatibilityPlaylist(session, timeoutMs = 45000) {
   throw new Error(`webOS compatibility stream did not become ready. ${getWebOSCompatibilitySessionLog(session)}`);
 }
 
-function rewriteWebOSCompatibilityPlaylist(playlist, key) {
+function getWebOSCompatibilityRequestOrigin(req) {
+  const host = req.headers.host;
+  if (!host) {
+    return '';
+  }
+
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const proto = forwardedProto || (req.socket && req.socket.encrypted ? 'https' : 'http');
+  return `${proto}://${host}`;
+}
+
+function buildWebOSCompatibilityMediaUrl(key, filename, origin) {
+  const mediaPath = `/api/webos-hls/${key}/${filename}`;
+  return origin ? `${origin}${mediaPath}` : mediaPath;
+}
+
+function rewriteWebOSCompatibilityPlaylistMapLine(line, key, origin) {
+  return line.replace(/URI="([^"]+)"/i, (match, uri) => {
+    if (!uri || /^[a-z][a-z0-9+.-]*:/i.test(uri) || uri.startsWith('/')) {
+      return match;
+    }
+
+    return `URI="${buildWebOSCompatibilityMediaUrl(key, uri, origin)}"`;
+  });
+}
+
+function rewriteWebOSCompatibilityPlaylist(playlist, key, origin) {
   return playlist
     .split('\n')
     .map((line) => {
       const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) {
+      if (!trimmed) {
         return line;
       }
-      if (/^segment\d+\.ts$/.test(trimmed)) {
-        return `/api/webos-hls/${key}/${trimmed}`;
+      if (/^#EXT-X-VERSION:/i.test(trimmed)) {
+        return '#EXT-X-VERSION:7';
+      }
+      if (/^#EXT-X-INDEPENDENT-SEGMENTS/i.test(trimmed)) {
+        return '';
+      }
+      if (/^#EXT-X-MAP:/i.test(trimmed)) {
+        return rewriteWebOSCompatibilityPlaylistMapLine(line, key, origin);
+      }
+      if (trimmed.startsWith('#')) {
+        return line;
+      }
+      if (/^segment\d+\.(?:m4s|ts)$/.test(trimmed)) {
+        return buildWebOSCompatibilityMediaUrl(key, trimmed, origin);
       }
       return line;
     })
     .join('\n');
+}
+
+function isWebOSCompatibilityMediaFilename(filename) {
+  return filename === 'init.mp4' || /^segment\d+\.(?:m4s|ts)$/.test(filename);
+}
+
+function getWebOSCompatibilityMediaContentType(filename) {
+  if (filename === 'init.mp4') {
+    return 'video/mp4';
+  }
+  if (/\.m4s$/i.test(filename)) {
+    return 'video/iso.segment';
+  }
+  return 'video/mp2t';
 }
 
 async function startWebOSCompatibilitySession(sourceUrl, source, start) {
@@ -290,7 +343,11 @@ async function startWebOSCompatibilitySession(sourceUrl, source, start) {
     '-map',
     '0:a:0?',
     '-vf',
-    'scale=-2:480',
+    'scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS',
+    '-af',
+    'aresample=async=1:first_pts=0,asetpts=PTS-STARTPTS',
+    '-r',
+    '24',
     '-c:v',
     'libx264',
     '-preset',
@@ -301,30 +358,44 @@ async function startWebOSCompatibilitySession(sourceUrl, source, start) {
     '3.0',
     '-pix_fmt',
     'yuv420p',
+    '-movflags',
+    '+faststart',
+    '-x264-params',
+    'keyint=48:min-keyint=48:scenecut=0:ref=1:bframes=0:cabac=0',
     '-g',
     '48',
     '-keyint_min',
     '48',
     '-sc_threshold',
     '0',
+    '-b:v',
+    '700k',
+    '-maxrate',
+    '850k',
+    '-bufsize',
+    '1700k',
     '-c:a',
     'aac',
     '-b:a',
-    '128k',
+    '96k',
     '-ac',
     '2',
     '-ar',
-    '48000',
+    '44100',
     '-f',
     'hls',
     '-hls_time',
     '4',
     '-hls_playlist_type',
     'event',
+    '-hls_segment_type',
+    'fmp4',
+    '-hls_fmp4_init_filename',
+    'init.mp4',
     '-hls_flags',
     'independent_segments',
     '-hls_segment_filename',
-    path.join(dir, 'segment%05d.ts'),
+    path.join(dir, 'segment%05d.m4s'),
     path.join(dir, 'index.m3u8')
   );
 
@@ -362,14 +433,14 @@ async function serveWebOSCompatibilityPlaylist(req, res, parsedUrl) {
   await waitForWebOSCompatibilityPlaylist(session);
   const playlistPath = path.join(session.dir, 'index.m3u8');
   const playlist = await fs.promises.readFile(playlistPath, 'utf8');
-  const body = rewriteWebOSCompatibilityPlaylist(playlist, session.key);
+  const body = rewriteWebOSCompatibilityPlaylist(playlist, session.key, getWebOSCompatibilityRequestOrigin(req));
   setWebOSCompatibilityHeaders(res, 'application/vnd.apple.mpegurl; charset=utf-8');
   res.statusCode = 200;
   res.end(body);
 }
 
-async function serveWebOSCompatibilitySegment(req, res, key, filename) {
-  if (!/^[a-f0-9]{32}$/.test(key) || !/^segment\d+\.ts$/.test(filename)) {
+async function serveWebOSCompatibilityMedia(req, res, key, filename) {
+  if (!/^[a-f0-9]{32}$/.test(key) || !isWebOSCompatibilityMediaFilename(filename)) {
     sendWebOSCompatibilityJson(res, 404, { error: 'Not found' });
     return;
   }
@@ -401,7 +472,7 @@ async function serveWebOSCompatibilitySegment(req, res, key, filename) {
     start = rangeMatch[1] ? Number(rangeMatch[1]) : 0;
     end = rangeMatch[2] ? Number(rangeMatch[2]) : end;
     if (start >= stat.size || end < start) {
-      setWebOSCompatibilityHeaders(res, 'video/mp2t', { 'Content-Range': `bytes */${stat.size}` });
+      setWebOSCompatibilityHeaders(res, getWebOSCompatibilityMediaContentType(filename), { 'Content-Range': `bytes */${stat.size}` });
       res.statusCode = 416;
       res.end();
       return;
@@ -412,7 +483,7 @@ async function serveWebOSCompatibilitySegment(req, res, key, filename) {
   }
 
   headers['Content-Length'] = String(end - start + 1);
-  setWebOSCompatibilityHeaders(res, 'video/mp2t', headers);
+  setWebOSCompatibilityHeaders(res, getWebOSCompatibilityMediaContentType(filename), headers);
   res.statusCode = statusCode;
   if (req.method === 'HEAD') {
     res.end();
@@ -562,12 +633,34 @@ async function serveWebOSRenderedMjpeg(req, res, parsedUrl) {
   child.stdout.pipe(res);
 }
 
+function getBoolQueryValue(query, name) {
+  const expectedName = String(name || '').toLowerCase();
+  for (const [key, value] of Object.entries(query || {})) {
+    if (String(key || '').toLowerCase() !== expectedName) {
+      continue;
+    }
+
+    const rawValue = Array.isArray(value) ? value[0] : value;
+    return /^(1|true|yes|on)$/i.test(String(rawValue || '').trim());
+  }
+
+  return false;
+}
+
+function isWebOSTranscodeProxyRequest(parsedUrl) {
+  return (
+    (parsedUrl.pathname || '') === '/api/proxy/vod/m3u8' &&
+    getBoolQueryValue(parsedUrl.query, 'Transcode')
+  );
+}
+
 async function handleWebOSCompatibilityHls(req, res, parsedUrl) {
   const pathname = parsedUrl.pathname || '';
   if (
     !pathname.startsWith('/api/webos-hls/') &&
     !pathname.startsWith('/api/webos-media/') &&
-    !pathname.startsWith('/api/webos-mjpeg/')
+    !pathname.startsWith('/api/webos-mjpeg/') &&
+    !isWebOSTranscodeProxyRequest(parsedUrl)
   ) {
     return false;
   }
@@ -595,14 +688,19 @@ async function handleWebOSCompatibilityHls(req, res, parsedUrl) {
       return true;
     }
 
+    if (isWebOSTranscodeProxyRequest(parsedUrl)) {
+      await serveWebOSCompatibilityPlaylist(req, res, parsedUrl);
+      return true;
+    }
+
     if (pathname === '/api/webos-mjpeg/stream.mjpg') {
       await serveWebOSRenderedMjpeg(req, res, parsedUrl);
       return true;
     }
 
-    const segmentMatch = /^\/api\/webos-hls\/([a-f0-9]{32})\/(segment\d+\.ts)$/.exec(pathname);
-    if (segmentMatch) {
-      await serveWebOSCompatibilitySegment(req, res, segmentMatch[1], segmentMatch[2]);
+    const mediaMatch = /^\/api\/webos-hls\/([a-f0-9]{32})\/(init\.mp4|segment\d+\.(?:m4s|ts))$/.exec(pathname);
+    if (mediaMatch) {
+      await serveWebOSCompatibilityMedia(req, res, mediaMatch[1], mediaMatch[2]);
       return true;
     }
 
