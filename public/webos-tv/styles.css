@@ -22,6 +22,7 @@ html,
 body {
   margin: 0;
   min-height: 100%;
+  width: 100%;
   background:
     radial-gradient(circle at top, rgba(30, 167, 255, 0.28), transparent 30%),
     linear-gradient(180deg, #0b1730 0%, #07101c 100%);
@@ -33,7 +34,44 @@ body {
 }
 
 body[data-remote-cast-fullscreen="true"] {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
   overflow: hidden;
+  background: #000;
+}
+
+body[data-remote-cast-fullscreen="true"] .app-shell {
+  width: 100%;
+  min-height: 100%;
+  padding: 0;
+}
+
+body[data-remote-cast-fullscreen="true"] .topbar,
+body[data-remote-cast-fullscreen="true"] .layout > .sidebar,
+body[data-remote-cast-fullscreen="true"] .content > .panel:not(.player-panel) {
+  display: none;
+}
+
+body[data-remote-cast-fullscreen="true"] .layout,
+body[data-remote-cast-fullscreen="true"] .content,
+body[data-remote-cast-fullscreen="true"] .player-panel {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+  box-shadow: none;
+}
+
+body[data-remote-cast-fullscreen="true"] .player-panel > .section-header {
+  display: none;
 }
 
 button,
@@ -369,20 +407,41 @@ body[data-remote-cast-fullscreen="true"] .player-panel {
   position: fixed;
   z-index: 1000;
   inset: 0;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  width: 100vw;
-  height: 100vh;
-  min-height: 100vh;
+  width: auto;
+  height: auto;
+  min-height: 0;
   border-radius: 0;
+  background: #000;
 }
 
 .player-shell[data-remote-cast-fullscreen="true"] .player,
 .player-shell[data-remote-cast-fullscreen="true"] .rendered-player {
-  width: 100vw;
-  height: 100vh;
+  width: 100%;
+  height: 100%;
+}
+
+.player-shell:fullscreen,
+.player-shell:-webkit-full-screen,
+.player-shell:-moz-full-screen,
+.player-shell:-ms-fullscreen {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  background: #000;
+}
+
+.player-shell:fullscreen .player,
+.player-shell:fullscreen .rendered-player,
+.player-shell:-webkit-full-screen .player,
+.player-shell:-webkit-full-screen .rendered-player,
+.player-shell:-moz-full-screen .player,
+.player-shell:-moz-full-screen .rendered-player,
+.player-shell:-ms-fullscreen .player,
+.player-shell:-ms-fullscreen .rendered-player {
+  width: 100%;
+  height: 100%;
 }
 
 .player-shell[data-remote-cast-fullscreen="true"] .player-danmaku-layer {

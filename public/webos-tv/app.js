@@ -698,7 +698,10 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
         playerError: lastPlayerErrorDebug,
         fullscreen: {
           body: document.body.dataset.remoteCastFullscreen || '',
-          shell: elements.playerShell ? elements.playerShell.dataset.remoteCastFullscreen || '' : ''
+          shell: elements.playerShell ? elements.playerShell.dataset.remoteCastFullscreen || '' : '',
+          native: Boolean(getNativeFullscreenElement()),
+          scrollX: window.pageXOffset || document.documentElement.scrollLeft || document.body.scrollLeft || 0,
+          scrollY: window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0
         },
         video: player ? {
           src: player.currentSrc || player.src || '',
@@ -3931,6 +3934,10 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   function onPlayerStateChange() {
     updatePlayerOverlay();
     updateRemoteDanmakuAnimationState();
+    if (remoteCastFullscreenActive && state.playerUrl && !getPlayerPaused()) {
+      requestNativePlayerFullscreenSoon();
+      resetRemoteCastViewport();
+    }
     if (!getPlayerPaused() && state.playerUrl) {
       revealPlayerControls();
     }
@@ -3943,19 +3950,37 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
   }
   function setRemoteCastFullscreenActive(active) {
     remoteCastFullscreenActive = Boolean(active);
+    if (remoteCastFullscreenActive) {
+      resetRemoteCastViewport();
+    }
     document.body.dataset.remoteCastFullscreen = remoteCastFullscreenActive ? 'true' : 'false';
     if (elements.playerShell) {
       elements.playerShell.dataset.remoteCastFullscreen = remoteCastFullscreenActive ? 'true' : 'false';
     }
+    if (remoteCastFullscreenActive) {
+      window.setTimeout(resetRemoteCastViewport, 0);
+    }
+  }
+  function resetRemoteCastViewport() {
+    try {
+      window.scrollTo(0, 0);
+    } catch (error) {}
+    if (document.documentElement) {
+      document.documentElement.scrollLeft = 0;
+      document.documentElement.scrollTop = 0;
+    }
+    if (document.body) {
+      document.body.scrollLeft = 0;
+      document.body.scrollTop = 0;
+    }
+  }
+  function getNativeFullscreenElement() {
+    return document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement || null;
   }
   function enterRemoteCastFullscreen() {
+    resetRemoteCastViewport();
     setRemoteCastFullscreenActive(true);
     setPlayerControlsOpen(true);
-    if (elements.playerPanel && typeof elements.playerPanel.scrollIntoView === 'function') {
-      elements.playerPanel.scrollIntoView({
-        block: 'center'
-      });
-    }
     if (elements.player && typeof elements.player.focus === 'function') {
       elements.player.focus();
     }
@@ -3975,7 +4000,7 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     setPlayerControlsOpen(true);
     window.clearTimeout(nativeFullscreenRequestTimer);
     nativeFullscreenRequestTimer = 0;
-    const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
+    const fullscreenElement = getNativeFullscreenElement();
     if (fullscreenElement) {
       const exit = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
       if (exit) {
@@ -3990,7 +4015,8 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
       if (!target) {
         return;
       }
-      const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
+      resetRemoteCastViewport();
+      const fullscreenElement = getNativeFullscreenElement();
       if (fullscreenElement) {
         return;
       }
