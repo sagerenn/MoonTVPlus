@@ -2913,6 +2913,9 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     lastPlayerErrorDebug = compactPlayerError();
     recordPlaybackDebugEvent('player-error', lastPlayerErrorDebug);
     updatePlayerOverlay();
+    if (triggerWebOSRenderedFallback('Video decode failed. Trying rendered compatibility playback.')) {
+      return;
+    }
     triggerHlsFallbackFromNative('Native HLS failed. Trying compatibility fallback.');
   }
   function triggerHlsFallbackFromNative(message) {
@@ -2983,6 +2986,42 @@ function _asyncToGenerator(n) { return function () { var t = this, e = arguments
     }).catch(function (error) {
       pendingAutoplay = false;
       setStatus(error.message || 'Playback setup failed.', 'error');
+    });
+    return true;
+  }
+  function shouldUseWebOSRenderedFallback() {
+    return Boolean(state.isHostedOnSameOrigin && isWebOSBrowser() && webOSTranscodeFallbackSource && !isRenderedPlaybackUrl(state.playerUrl) && (isWebOSTranscodePlaybackUrl(state.playerUrl) || activePlayerEngine === 'hls' || activePlayerEngine === 'failed'));
+  }
+  function triggerWebOSRenderedFallback(message) {
+    if (!state.playerUrl || !shouldUseWebOSRenderedFallback()) {
+      return false;
+    }
+    const shouldResume = !getPlayerPaused() || pendingAutoplay || Boolean(pendingRemotePlaybackState && pendingRemotePlaybackState.paused !== true);
+    const start = resolveWebOSTranscodeFallbackStart();
+    const source = state.detail && state.detail.source || 'directplay';
+    const renderedUrl = buildWebOSRenderedPlaybackUrl(webOSTranscodeFallbackSource, source, start);
+    webOSTranscodeFallbackStart = start;
+    webOSCompatibilityPlaybackOffset = resolveWebOSCompatibilityStartValue(start);
+    state.playerUrl = renderedUrl;
+    activePlayerSource = renderedUrl;
+    activePlayerEngine = 'rendered';
+    pendingAutoplay = shouldResume;
+    elements.playerEngineBadge.textContent = 'Rendered';
+    recordPlaybackDebugEvent('webos-rendered-fallback', {
+      originalUrl: webOSTranscodeFallbackSource,
+      renderedUrl: renderedUrl,
+      message: message,
+      start: webOSCompatibilityPlaybackOffset,
+      shouldResume: shouldResume
+    });
+    setStatus(message, 'error');
+    attachPlayerSource(renderedUrl).then(function () {
+      if (shouldResume) {
+        playPlayerSoon();
+      }
+    }).catch(function (error) {
+      pendingAutoplay = false;
+      setStatus(error.message || 'Rendered playback setup failed.', 'error');
     });
     return true;
   }

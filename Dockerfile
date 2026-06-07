@@ -3,6 +3,9 @@ FROM node:24-alpine AS deps
 
 ARG ALPINE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/alpine
 ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG NODE_DISTURL=https://npmmirror.com/mirrors/node
+
+ENV npm_config_disturl=${NODE_DISTURL}
 
 RUN sed -i "s#https\\?://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk/repositories \
   && apk add --no-cache python3 make g++
@@ -24,6 +27,8 @@ RUN pnpm install --frozen-lockfile
 FROM node:24-alpine AS builder
 ARG ALPINE_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/alpine
 ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG NODE_DISTURL=https://npmmirror.com/mirrors/node
+ENV npm_config_disturl=${NODE_DISTURL}
 RUN sed -i "s#https\\?://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#g" /etc/apk/repositories \
   && apk add --no-cache python3 make g++
 RUN npm config set registry "$NPM_REGISTRY" \

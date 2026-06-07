@@ -51,7 +51,8 @@ const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 const webOSCompatibilityHlsRoot = process.env.WEBOS_HLS_CACHE_DIR || '/tmp/moontv-webos-hls';
 const webOSCompatibilityHlsSessions = new Map();
-const webOSCompatibilityProfileVersion = 'fmp4-360p-v2';
+const webOSCompatibilityProfileVersion = 'mpegts-360p-v1';
+const webOSMjpegBoundary = 'moontvframe';
 
 function setWebOSCompatibilityHeaders(res, contentType, extraHeaders = {}) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -388,14 +389,10 @@ async function startWebOSCompatibilitySession(sourceUrl, source, start) {
     '4',
     '-hls_playlist_type',
     'event',
-    '-hls_segment_type',
-    'fmp4',
-    '-hls_fmp4_init_filename',
-    'init.mp4',
     '-hls_flags',
     'independent_segments',
     '-hls_segment_filename',
-    path.join(dir, 'segment%05d.m4s'),
+    path.join(dir, 'segment%05d.ts'),
     path.join(dir, 'index.m3u8')
   );
 
@@ -492,6 +489,116 @@ async function serveWebOSCompatibilityMedia(req, res, key, filename) {
   fs.createReadStream(filePath, { start, end }).pipe(res);
 }
 
+async function serveWebOSMjpegStream(req, res, parsedUrl) {
+  const sourceUrl = String(parsedUrl.query.url || '');
+  const source = String(parsedUrl.query.source || 'directplay');
+  const start = resolveWebOSCompatibilityStart(parsedUrl.query.start);
+
+  if (!sourceUrl) {
+    sendWebOSCompatibilityJson(res, 400, { error: 'Missing source URL' });
+    return;
+  }
+
+  await assertPublicHttpUrl(sourceUrl);
+
+  if (req.method === 'HEAD') {
+    setWebOSCompatibilityHeaders(res, `multipart/x-mixed-replace; boundary=${webOSMjpegBoundary}`);
+    res.statusCode = 200;
+    res.end();
+    return;
+  }
+
+  const sourceOrigin = new URL(sourceUrl).origin + '/';
+  const args = [
+    '-hide_banner',
+    '-loglevel',
+    'warning',
+    '-user_agent',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    '-referer',
+    sourceOrigin,
+    '-reconnect',
+    '1',
+    '-reconnect_streamed',
+    '1',
+    '-reconnect_delay_max',
+    '2',
+  ];
+
+  if (start > 0) {
+    args.push('-ss', String(start));
+  }
+
+  args.push(
+    '-i',
+    sourceUrl,
+    '-map',
+    '0:v:0',
+    '-an',
+    '-vf',
+    'scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=8',
+    '-q:v',
+    '6',
+    '-f',
+    'mpjpeg',
+    '-boundary_tag',
+    webOSMjpegBoundary,
+    'pipe:1'
+  );
+
+  console.log(`[webOS MJPEG] start source=${source} start=${start}`);
+  setWebOSCompatibilityHeaders(res, `multipart/x-mixed-replace; boundary=${webOSMjpegBoundary}`, {
+    Connection: 'close',
+    'X-Accel-Buffering': 'no',
+  });
+  res.statusCode = 200;
+  res.flushHeaders?.();
+
+  const child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderrTail = '';
+  let responseEnded = false;
+
+  const stop = () => {
+    if (child.exitCode === null && !child.killed) {
+      child.kill('SIGTERM');
+      setTimeout(() => {
+        if (child.exitCode === null && !child.killed) {
+          child.kill('SIGKILL');
+        }
+      }, 1500).unref?.();
+    }
+  };
+
+  req.on('close', stop);
+  res.on('close', stop);
+  child.stdout.on('data', (chunk) => {
+    if (responseEnded || res.destroyed) {
+      return;
+    }
+    if (!res.write(chunk)) {
+      child.stdout.pause();
+      res.once('drain', () => child.stdout.resume());
+    }
+  });
+  child.stderr.on('data', (chunk) => {
+    stderrTail = (stderrTail + chunk.toString('utf8')).slice(-1200);
+  });
+  child.on('error', (error) => {
+    console.error('[webOS MJPEG] ffmpeg error:', error);
+    if (!responseEnded && !res.destroyed) {
+      responseEnded = true;
+      res.end();
+    }
+  });
+  child.on('exit', (code, signal) => {
+    console.log(`[webOS MJPEG] exit code=${code} signal=${signal}${stderrTail ? ` ${stderrTail}` : ''}`);
+    if (!responseEnded && !res.destroyed) {
+      responseEnded = true;
+      res.end();
+    }
+  });
+}
+
 function getBoolQueryValue(query, name) {
   const expectedName = String(name || '').toLowerCase();
   for (const [key, value] of Object.entries(query || {})) {
@@ -513,9 +620,13 @@ function isWebOSTranscodeProxyRequest(parsedUrl) {
   );
 }
 
+function isWebOSMjpegRequest(parsedUrl) {
+  return (parsedUrl.pathname || '') === '/api/webos-mjpeg/stream.mjpg';
+}
+
 async function handleWebOSCompatibilityHls(req, res, parsedUrl) {
   const pathname = parsedUrl.pathname || '';
-  if (!pathname.startsWith('/api/webos-hls/') && !isWebOSTranscodeProxyRequest(parsedUrl)) {
+  if (!pathname.startsWith('/api/webos-hls/') && !isWebOSTranscodeProxyRequest(parsedUrl) && !isWebOSMjpegRequest(parsedUrl)) {
     return false;
   }
 
@@ -532,6 +643,11 @@ async function handleWebOSCompatibilityHls(req, res, parsedUrl) {
   }
 
   try {
+    if (isWebOSMjpegRequest(parsedUrl)) {
+      await serveWebOSMjpegStream(req, res, parsedUrl);
+      return true;
+    }
+
     if (isWebOSTranscodeProxyRequest(parsedUrl)) {
       await serveWebOSCompatibilityPlaylist(req, res, parsedUrl);
       return true;
